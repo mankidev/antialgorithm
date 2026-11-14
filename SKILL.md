@@ -1,6 +1,6 @@
 ---
 name: antialgorithm
-description: Stops the safe, average, comfortable pick that AI reaches for first. Use whenever a creative choice is made: ideas, names, story, game mechanics, visual style, color, layout, UI, composition, wording, tone, titles, descriptions. Also use when the user says "too generic", "boring", "typical AI", "too safe", "cliche", "average", "seen it before".
+description: 'Stops the safe, average, comfortable pick that AI reaches for first. Use whenever a creative choice is made: ideas, names, story, game mechanics, visual style, color, layout, UI, composition, wording, tone, titles, descriptions. Also use when the user says "too generic", "boring", "typical AI", "too safe", "cliche", "average", "seen it before".'
 ---
 
 # antialgorithm
