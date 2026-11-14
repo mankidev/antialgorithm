@@ -36,12 +36,101 @@ def fmt(x):
     return f"{x:.2f}".rstrip("0").rstrip(".")
 
 
+def pt(p):
+    return f"{fmt(p[0])},{fmt(p[1])}"
+
+
+def lerp(a, b, t):
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+
+def split_cubic(p0, c1, c2, p1):
+    a, b, c = lerp(p0, c1, 0.5), lerp(c1, c2, 0.5), lerp(c2, p1, 0.5)
+    d, e = lerp(a, b, 0.5), lerp(b, c, 0.5)
+    m = lerp(d, e, 0.5)
+    return (p0, a, d, m), (m, e, c, p1)
+
+
+def parse_path(d):
+    toks = TOK.findall(d)
+    segs = []
+    cmd = None
+    cur = start = (0.0, 0.0)
+    last_c = last_q = None
+    i = 0
+    while i < len(toks):
+        if toks[i].isalpha():
+            cmd = toks[i]
+            i += 1
+            if cmd in "Zz":
+                segs.append(("Z",))
+                cur = start
+                last_c = last_q = None
+            continue
+        if cmd is None or cmd in "Zz":
+            i += 1
+            continue
+        c = cmd.lower()
+        n = ARGS[c]
+        chunk = toks[i:i + n]
+        if len(chunk) < n or any(t.isalpha() for t in chunk):
+            break
+        a = [float(t) for t in chunk]
+        i += n
+        ox, oy = cur if cmd.islower() else (0.0, 0.0)
+        new_c = new_q = None
+        if c == "m":
+            p = (a[0] + ox, a[1] + oy)
+            segs.append(("M", p))
+            start = p
+            cmd = "l" if cmd.islower() else "L"
+        elif c == "l":
+            p = (a[0] + ox, a[1] + oy)
+            segs.append(("L", p))
+        elif c == "h":
+            p = (a[0] + ox, cur[1])
+            segs.append(("L", p))
+        elif c == "v":
+            p = (cur[0], a[0] + oy)
+            segs.append(("L", p))
+        elif c in "cs":
+            if c == "c":
+                c1 = (a[0] + ox, a[1] + oy)
+                rest = a[2:]
+            else:
+                c1 = (2 * cur[0] - last_c[0], 2 * cur[1] - last_c[1]) if last_c else cur
+                rest = a
+            c2 = (rest[0] + ox, rest[1] + oy)
+            p = (rest[2] + ox, rest[3] + oy)
+            segs.append(("C", c1, c2, p))
+            new_c = c2
+        elif c in "qt":
+            if c == "q":
+                q1 = (a[0] + ox, a[1] + oy)
+                p = (a[2] + ox, a[3] + oy)
+            else:
+                q1 = (2 * cur[0] - last_q[0], 2 * cur[1] - last_q[1]) if last_q else cur
+                p = (a[0] + ox, a[1] + oy)
+            c1 = lerp(cur, q1, 2 / 3)
+            c2 = lerp(p, q1, 2 / 3)
+            segs.append(("C", c1, c2, p))
+            new_q = q1
+        else:
+            p = (a[5] + ox, a[6] + oy)
+            segs.append(("A", a[0], a[1], a[2], int(a[3]), int(a[4]), p))
+        cur = p
+        last_c, last_q = new_c, new_q
+    return segs
+
+
 class Rougher:
-    def __init__(self, amp, rng, filter_id, box):
+    def __init__(self, amp, rng, root, box):
         self.amp = amp
         self.rng = rng
-        self.filter_id = filter_id
+        self.root = root
         self.box = box
+        self.free = True
+        self.filter_id = None
 
     def j(self, scale=1.0):
         return self.rng.gauss(0, self.amp * scale)
@@ -49,33 +138,37 @@ class Rougher:
     def jx(self, x, scale):
         x0, _, w, _ = self.box
         d = self.j(scale)
-        if x <= x0 + 1:
+        if self.free and x <= x0 + 1:
             return x - abs(d) - 1
-        if x >= x0 + w - 1:
+        if self.free and x >= x0 + w - 1:
             return x + abs(d) + 1
         return x + d
 
     def jy(self, y, scale):
         _, y0, _, h = self.box
         d = self.j(scale)
-        if y <= y0 + 1:
+        if self.free and y <= y0 + 1:
             return y - abs(d) - 1
-        if y >= y0 + h - 1:
+        if self.free and y >= y0 + h - 1:
             return y + abs(d) + 1
         return y + d
+
+    def jp(self, p, scale=0.6):
+        return (self.jx(p[0], scale), self.jy(p[1], scale))
+
+    def steps(self, a, b):
+        return max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (self.amp * 18 + 1e-6)))
 
     def wobble(self, pts, closed):
         out = []
         seq = pts + ([pts[0]] if closed else [])
-        for (x0, y0), (x1, y1) in zip(seq, seq[1:]):
-            n = max(1, int(math.hypot(x1 - x0, y1 - y0) / (self.amp * 18 + 1e-6)))
+        for a, b in zip(seq, seq[1:]):
+            n = self.steps(a, b)
             for k in range(n):
-                t = k / n
-                out.append((self.jx(x0 + (x1 - x0) * t, 0.6), self.jy(y0 + (y1 - y0) * t, 0.6)))
+                out.append(self.jp(lerp(a, b, k / n)))
         if not closed:
-            ex, ey = seq[-1]
-            out.append((self.jx(ex, 0.6), self.jy(ey, 0.6)))
-        d = "M" + " L".join(f"{fmt(x)},{fmt(y)}" for x, y in out)
+            out.append(self.jp(seq[-1]))
+        d = "M" + " L".join(pt(p) for p in out)
         return d + ("Z" if closed else "")
 
     def to_path(self, el, d):
@@ -128,57 +221,106 @@ class Rougher:
             a = math.tau * k / n
             r = 1 + 0.5 * self.j(1 / max(rx, ry)) + 0.015 * math.sin(3 * a + drift)
             pts.append((cx + rx * r * math.cos(a), cy + ry * r * math.sin(a)))
-        d = "M" + " L".join(f"{fmt(x)},{fmt(y)}" for x, y in pts) + "Z"
+        d = "M" + " L".join(pt(p) for p in pts) + "Z"
         small = max(rx, ry) < self.amp * 6
         self.to_path(el, d)
         if small:
             self.shift(el)
 
+    def straight(self, out, a, b):
+        n = self.steps(a, b)
+        for k in range(1, n):
+            out.append("L" + pt(self.jp(lerp(a, b, k / n))))
+
+    def curve(self, out, seg, ja, jb, depth=0):
+        p0, c1, c2, p1 = seg
+        if depth < 3 and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > self.amp * 30:
+            left, right = split_cubic(*seg)
+            jm = self.jp(left[3])
+            self.curve(out, left, ja, jm, depth + 1)
+            self.curve(out, right, jm, jb, depth + 1)
+            return
+        da = (ja[0] - p0[0], ja[1] - p0[1])
+        db = (jb[0] - p1[0], jb[1] - p1[1])
+        k1 = (c1[0] + da[0] + self.j(0.35), c1[1] + da[1] + self.j(0.35))
+        k2 = (c2[0] + db[0] + self.j(0.35), c2[1] + db[1] + self.j(0.35))
+        out.append(f"C{pt(k1)} {pt(k2)} {pt(jb)}")
+
     def path(self, el):
-        toks = TOK.findall(el.get("d", ""))
-        out, cmd, i, argi = [], None, 0, 0
-        while i < len(toks):
-            t = toks[i]
-            if t.isalpha():
-                cmd, argi = t, 0
-                out.append(t)
-                i += 1
-                continue
-            v = float(t)
-            if cmd is None:
-                out.append(t)
+        segs = parse_path(el.get("d", ""))
+        if not segs or segs[0][0] != "M":
+            return
+        out = []
+        cur = start = (0.0, 0.0)
+        jcur = jstart = cur
+        for s in segs:
+            kind = s[0]
+            if kind == "M":
+                cur = start = s[1]
+                jcur = jstart = self.jp(cur)
+                out.append("M" + pt(jcur))
+            elif kind == "L":
+                self.straight(out, cur, s[1])
+                cur, jcur = s[1], self.jp(s[1])
+                out.append("L" + pt(jcur))
+            elif kind == "C":
+                jend = self.jp(s[3])
+                self.curve(out, (cur, s[1], s[2], s[3]), jcur, jend)
+                cur, jcur = s[3], jend
+            elif kind == "A":
+                _, rx, ry, rot, large, sweep, p = s
+                jcur = self.jp(p)
+                out.append(f"A{fmt(rx)} {fmt(ry)} {fmt(rot)} {large} {sweep} {pt(jcur)}")
+                cur = p
             else:
-                c = cmd.lower()
-                n = ARGS.get(c, 2) or 1
-                pos = argi % n
-                rel = cmd.islower()
-                if c == "a" and pos < 5:
-                    out.append(t)
-                elif rel:
-                    out.append(fmt(v + self.j(0.35)))
-                elif c == "h" or (c != "v" and (pos % 2 == 0 if c != "a" else pos == 5)):
-                    out.append(fmt(self.jx(v, 0.6)))
-                else:
-                    out.append(fmt(self.jy(v, 0.6)))
-                argi += 1
-            i += 1
+                self.straight(out, cur, start)
+                out.append("Z")
+                cur, jcur = start, jstart
         el.set("d", " ".join(out))
 
-    def text(self, el, size):
-        chars = "".join(el.itertext())
-        if not chars or list(el):
-            return
-        k = 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
+    def ensure_filter(self):
+        if self.filter_id:
+            return self.filter_id
+        used = {e.get("id") for e in self.root.iter() if e.get("id")}
+        fid, k = "rough-edge", 2
+        while fid in used:
+            fid, k = f"rough-edge-{k}", k + 1
+        defs = next((c for c in self.root if tag(c) == "defs"), None)
+        if defs is None:
+            defs = ET.Element(f"{{{SVG_NS}}}defs")
+            self.root.insert(0, defs)
+        f = ET.SubElement(defs, f"{{{SVG_NS}}}filter", {"id": fid, "x": "-5%", "y": "-5%", "width": "110%", "height": "110%"})
+        ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": "0.9", "numOctaves": "2", "seed": str(self.rng.randint(1, 9999)), "result": "n"})
+        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": fmt(self.amp * 2.2), "xChannelSelector": "R", "yChannelSelector": "G"})
+        self.filter_id = fid
+        return fid
+
+    def shake(self, el, chars, k):
         n = len(chars)
-        rot = [fmt(self.rng.gauss(0, 2.2 * k)) for _ in range(n)]
-        offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
-        dys = [offs[0]] + [offs[i] - offs[i - 1] for i in range(1, n)]
+        if not n:
+            return
         if not el.get("rotate"):
-            el.set("rotate", " ".join(rot))
-        if not el.get("dy"):
-            el.set("dy", " ".join(fmt(d) for d in dys))
-        if size >= 28 and not el.get("filter"):
-            el.set("filter", f"url(#{self.filter_id})")
+            el.set("rotate", " ".join(fmt(self.rng.gauss(0, 2.2 * k)) for _ in range(n)))
+        own = el.get("dy", "")
+        if len(NUM.findall(own)) > 1:
+            return
+        offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
+        dys = [offs[0] + fnum(own)] + [offs[i] - offs[i - 1] for i in range(1, n)]
+        el.set("dy", " ".join(fmt(d) for d in dys))
+
+    def text(self, el, size):
+        k = 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
+        kids = list(el)
+        if not kids:
+            self.shake(el, el.text or "", k)
+        else:
+            for t in el.iter():
+                if t is not el and tag(t) == "tspan" and not list(t):
+                    ts = style_get(t, "font-size")
+                    tsize = fnum(ts, size) if ts else size
+                    self.shake(t, t.text or "", 0.25 if tsize < 16 else (0.6 if tsize < 32 else 1.0))
+        if size >= 28 and not el.get("filter") and "".join(el.itertext()).strip():
+            el.set("filter", f"url(#{self.ensure_filter()})")
 
     def walk(self, el, size):
         fs = style_get(el, "font-size")
@@ -188,33 +330,27 @@ class Rougher:
             t = tag(child)
             if t in SKIP:
                 continue
+            was = self.free
+            if child.get("transform"):
+                self.free = False
             if t == "text":
                 cs = style_get(child, "font-size")
                 self.text(child, fnum(cs, size) if cs else size)
-                continue
-            if t == "line":
-                self.line(child)
-            elif t == "rect":
-                self.rect(child)
-            elif t == "polyline":
-                self.poly(child, False)
-            elif t == "polygon":
-                self.poly(child, True)
-            elif t in ("circle", "ellipse"):
-                self.ellipse(child)
-            elif t == "path":
-                self.path(child)
-            self.walk(child, size)
-
-
-def add_filter(root, fid, amp, seed):
-    defs = next((c for c in root if tag(c) == "defs"), None)
-    if defs is None:
-        defs = ET.Element(f"{{{SVG_NS}}}defs")
-        root.insert(0, defs)
-    f = ET.SubElement(defs, f"{{{SVG_NS}}}filter", {"id": fid, "x": "-5%", "y": "-5%", "width": "110%", "height": "110%"})
-    ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": "0.9", "numOctaves": "2", "seed": str(seed), "result": "n"})
-    ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": fmt(amp * 2.2), "xChannelSelector": "R", "yChannelSelector": "G"})
+            else:
+                if t == "line":
+                    self.line(child)
+                elif t == "rect":
+                    self.rect(child)
+                elif t == "polyline":
+                    self.poly(child, False)
+                elif t == "polygon":
+                    self.poly(child, True)
+                elif t in ("circle", "ellipse"):
+                    self.ellipse(child)
+                elif t == "path":
+                    self.path(child)
+                self.walk(child, size)
+            self.free = was
 
 
 def main():
@@ -231,9 +367,7 @@ def main():
     box = vb if len(vb) == 4 else [0.0, 0.0, fnum(root.get("width"), 600), fnum(root.get("height"), 600)]
     w, h = box[2], box[3]
     amp = args.amount * math.hypot(w, h) / 720 * 1.4
-    fid = "rough-edge"
-    add_filter(root, fid, amp, rng.randint(1, 9999))
-    Rougher(amp, rng, fid, box).walk(root, 16.0)
+    Rougher(amp, rng, root, box).walk(root, 16.0)
     tree.write(args.dst, encoding="unicode", xml_declaration=False)
     print(f"wrote {args.dst} (amp {amp:.2f})")
 

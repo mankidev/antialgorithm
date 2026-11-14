@@ -99,12 +99,35 @@ def main():
 
     parent = {c: p for p in root.iter() for c in p}
 
+    def has_filter(el):
+        return "filter" in el.attrib or "filter" in el.get("style", "")
+
     def filtered(el):
         while el is not None:
-            if "filter" in el.attrib or "filter" in el.get("style", ""):
+            if has_filter(el):
                 return True
             el = parent.get(el)
         return False
+
+    def ancestor_filtered(el):
+        return filtered(parent.get(el))
+
+    own_filter = [has_filter(t) for t in texts(root)]
+    plain = None
+    if any(own_filter):
+        nf = copy.deepcopy(tree)
+        for t in texts(nf.getroot()):
+            t.attrib.pop("filter", None)
+            st = t.get("style", "")
+            if "filter" in st:
+                t.set("style", re.sub(r"filter\s*:[^;]*;?", "", st))
+        nf_svg = os.path.join(out, "_nofilter.svg")
+        nf_png = os.path.join(out, "_nofilter.png")
+        write(nf, nf_svg)
+        render(nf_svg, nf_png, args.width)
+        plain = np.asarray(Image.open(nf_png).convert("RGB"), dtype=np.float32)
+        os.remove(nf_svg)
+        os.remove(nf_png)
 
     problems = []
     tmp = tempfile.mkdtemp()
@@ -155,10 +178,10 @@ def main():
             sides.append("bottom")
         if sides:
             problems.append(f"text '{name}': runs off the {'/'.join(sides)} edge")
-        height_px = (ys.max() - ys.min() + 1) / scale
         lines = max(1, len(texts(root)[i].findall(f"{{{SVG_NS}}}tspan")))
-        if height_px / lines < 7 and not sides:
-            problems.append(f"text '{name}': very small, about {height_px / lines:.0f} units tall")
+        share = (ys.max() - ys.min() + 1) / scale / lines / max(w, h)
+        if share < 0.012 and not sides:
+            problems.append(f"text '{name}': very small, about {share * 100:.1f}% of the image side (want 1.2%+)")
 
         rgba = np.asarray(Image.open(pp).convert("RGBA"), dtype=np.float32)
         inner = rgba[p:p + ch, p:p + cw]
@@ -169,7 +192,8 @@ def main():
             continue
         own = np.zeros_like(full)
         own[:ih, :iw] = inner[:ih, :iw, :3]
-        cover = np.abs(full - own).mean(axis=2)[mask].mean()
+        base = plain if own_filter[i] and plain is not None else full
+        cover = (np.abs(base - own).mean(axis=2)[mask] > 60).mean()
         ring = np.zeros_like(mask)
         r = max(2, int(3 * scale))
         for dy in (-r, 0, r):
@@ -178,8 +202,8 @@ def main():
         ring &= ~mask
         lum = lambda c: c @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
         contrast = abs(lum(full[mask]).mean() - lum(full[ring]).mean()) if ring.any() else 255
-        if cover > 60 and not filtered(texts(root)[i]):
-            problems.append(f"text '{name}': covered or changed by something drawn over it")
+        if cover > 0.04 and not ancestor_filtered(texts(root)[i]):
+            problems.append(f"text '{name}': {cover * 100:.0f}% covered or changed by something drawn over it")
         elif contrast < 30:
             problems.append(f"text '{name}': low contrast with what is behind it ({contrast:.0f}, want 30+)")
     shutil.rmtree(tmp, ignore_errors=True)
