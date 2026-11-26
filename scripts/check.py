@@ -172,6 +172,21 @@ def line_direction(text, parent, vertical):
     return m @ np.array([0.0, 1.0] if vertical else [1.0, 0.0])
 
 
+def opacity(text, parent):
+    total, fill = 1.0, None
+    for e in reversed(ancestry(text, parent)):
+        for prop in ("opacity", "fill-opacity"):
+            v = (style_value(e, prop) or "").strip()
+            n = float(v[:-1]) / 100 if v.endswith("%") and NUM.fullmatch(v[:-1]) else float(v) if NUM.fullmatch(v) else None
+            if n is None:
+                continue
+            if prop == "opacity":
+                total *= min(max(n, 0.0), 1.0)
+            elif fill is None:
+                fill = min(max(n, 0.0), 1.0)
+    return total * (1.0 if fill is None else fill)
+
+
 def vertical_text(text, parent):
     for e in reversed(ancestry(text, parent)):
         mode = style_value(e, "writing-mode")
@@ -539,7 +554,8 @@ def check(args, tmp):
         own = np.zeros_like(full)
         own[:ih, :iw] = inner[:ih, :iw, :3]
         base = plain if text_filtered[i] else full
-        if peak < 250:
+        solid = mask.copy()
+        if opacity(t, parent) < 0.98:
             behind = copy.deepcopy(nf if text_filtered[i] else tree)
             hide(texts(behind.getroot())[i])
             bp = os.path.join(tmp, f"b{i}.svg")
@@ -548,7 +564,9 @@ def check(args, tmp):
             alpha = np.zeros(full.shape[:2] + (1,), np.float32)
             alpha[:ih, :iw] = inner[:ih, :iw, 3:4] / 255
             own = own * alpha + flat(bp + ".png", 255) * (1 - alpha)
-        cover = (np.abs(base - own).mean(axis=2)[mask] > 60).mean()
+        else:
+            solid[:ih, :iw] &= inner[:ih, :iw, 3] > 200
+        cover = (np.abs(base - own).mean(axis=2)[solid] > 60).mean() if solid.sum() >= 4 else 0.0
         ring = np.zeros_like(mask)
         r = max(2, int(3 * sx))
         for dy in (-r, 0, r):
