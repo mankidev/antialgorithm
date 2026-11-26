@@ -20,6 +20,27 @@ LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*([a-zA-Z%
 UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6}
 TRANSFORM = re.compile(r"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)")
 FONT_KEYWORDS = {"xx-small": 9.0, "x-small": 10.0, "small": 13.0, "medium": 16.0, "large": 18.0, "x-large": 24.0, "xx-large": 32.0}
+SIMPLE = re.compile(r"(\*|[\w-]+)|#([\w-]+)|\.([\w-]+)|\[\s*([\w:-]+)\s*(?:([~|^$*]?=)\s*(\"[^\"]*\"|'[^']*'|[^\]\s]*)\s*)?\]|(:[\w-]+)")
+COMPOUND = re.compile(r"\s*([>+~])\s*|\s+|((?:[^\s>+~\[(]|\[[^\]]*\]|\([^)]*\))+)")
+CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+IMPORTANT = re.compile(r"!\s*important\s*$", re.IGNORECASE)
+INITIAL = {
+    "opacity": "1", "display": "inline", "overflow": "visible", "clip-path": "none", "mask": "none", "filter": "none",
+    "transform": "none", "stop-color": "black", "stop-opacity": "1", "flood-color": "black", "flood-opacity": "1",
+    "lighting-color": "white", "mix-blend-mode": "normal", "isolation": "auto", "baseline-shift": "baseline",
+    "alignment-baseline": "auto", "text-decoration": "none", "unicode-bidi": "normal",
+}
+PRESENTATION = {
+    "alignment-baseline", "baseline-shift", "clip", "clip-path", "clip-rule", "color", "color-interpolation",
+    "color-interpolation-filters", "color-rendering", "cursor", "direction", "display", "dominant-baseline", "fill",
+    "fill-opacity", "fill-rule", "filter", "flood-color", "flood-opacity", "font-family", "font-size",
+    "font-size-adjust", "font-stretch", "font-style", "font-variant", "font-weight", "image-rendering",
+    "letter-spacing", "lighting-color", "marker-end", "marker-mid", "marker-start", "mask", "opacity", "overflow",
+    "paint-order", "pointer-events", "shape-rendering", "stop-color", "stop-opacity", "stroke", "stroke-dasharray",
+    "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity", "stroke-width",
+    "text-anchor", "text-decoration", "text-rendering", "unicode-bidi", "vector-effect", "visibility", "word-spacing",
+    "writing-mode",
+}
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
 
 
@@ -57,18 +78,32 @@ def font_px(v, parent, rem=16.0):
     return length(v, parent, parent, parent, rem)
 
 
+def font_shorthand_size(v):
+    for word in v.split():
+        size = word.split("/")[0].lower()
+        if size in FONT_KEYWORDS or size in ("smaller", "larger"):
+            return size
+        m = LENGTH.match(size)
+        if m and m.group(2):
+            return size
+    return None
+
+
 def declarations(body):
     out = {}
     for part in body.split(";"):
         if ":" not in part:
             continue
         key, value = (s.strip() for s in part.split(":", 1))
-        key, value = key.lower(), value.replace("!important", "").strip()
-        if key == "marker":
-            out["marker-start"] = out["marker-end"] = value
-            key = "marker-mid"
-        if value:
-            out[key] = value
+        important = bool(IMPORTANT.search(value))
+        key, value = key.lower(), IMPORTANT.sub("", value).strip()
+        if key == "font":
+            key, value = "font-size", font_shorthand_size(value)
+        if not value:
+            continue
+        for name in ("marker-start", "marker-mid", "marker-end") if key == "marker" else (key,):
+            if important or not out.get(name, ("", False))[1]:
+                out[name] = (value, important)
     return out
 
 
@@ -256,16 +291,145 @@ def transform_scale(spec):
     return math.sqrt((total + math.sqrt(max(0.0, total * total - 4 * det * det))) / 2)
 
 
+def css_rules(css):
+    css, depth, start, prelude, body = CSS_COMMENT.sub("", css), 0, 0, "", 0
+    for i, ch in enumerate(css):
+        if ch == ";" and depth == 0:
+            start = i + 1
+        elif ch == "{":
+            if depth == 0:
+                prelude, body = css[start:i], i + 1
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                if not prelude.strip().startswith("@") and "{" not in css[body:i]:
+                    yield prelude, css[body:i]
+                start = i + 1
+
+
+def split_selectors(prelude):
+    parts, cur, level = [], "", 0
+    for ch in prelude:
+        if ch == "," and level == 0:
+            parts.append(cur)
+            cur = ""
+            continue
+        level += (ch in "([") - (ch in ")]")
+        cur += ch
+    return parts + [cur]
+
+
+def parse_compound(text):
+    found = list(SIMPLE.finditer(text))
+    if sum(len(m.group(0)) for m in found) != len(text):
+        return None
+    comp = {"type": None, "ids": [], "classes": [], "attrs": [], "pseudos": []}
+    for m in found:
+        if m.group(1):
+            comp["type"] = m.group(1)
+        elif m.group(2):
+            comp["ids"].append(m.group(2))
+        elif m.group(3):
+            comp["classes"].append(m.group(3))
+        elif m.group(4):
+            comp["attrs"].append((m.group(4), m.group(5), (m.group(6) or "").strip("\"'")))
+        elif m.group(7) in (":root", ":first-child", ":last-child"):
+            comp["pseudos"].append(m.group(7))
+        else:
+            return None
+    return comp
+
+
+def parse_selector(sel):
+    parts, comb = [], None
+    for m in COMPOUND.finditer(sel.strip()):
+        if m.group(2):
+            comp = parse_compound(m.group(2))
+            if comp is None:
+                return None
+            parts.append((comb, comp))
+            comb = None
+        elif parts:
+            comb = m.group(1) or " "
+    return parts or None
+
+
+def specificity(parts):
+    comps = [c for _, c in parts]
+    return (
+        sum(len(c["ids"]) for c in comps),
+        sum(len(c["classes"]) + len(c["attrs"]) + len(c["pseudos"]) for c in comps),
+        sum(1 for c in comps if c["type"] not in (None, "*")),
+    )
+
+
+def attr_matches(have, op, want):
+    if have is None:
+        return False
+    if not op:
+        return True
+    if op == "=":
+        return have == want
+    if op == "~=":
+        return want in have.split()
+    if op == "|=":
+        return have == want or have.startswith(want + "-")
+    if op == "^=":
+        return bool(want) and have.startswith(want)
+    if op == "$=":
+        return bool(want) and have.endswith(want)
+    return bool(want) and want in have
+
+
 class Sheet:
     def __init__(self, root):
+        self.root = root
         self.parent = {c: p for p in root.iter() for c in p}
-        self.styled = any(tag(e) == "style" and (e.text or "").strip() for e in root.iter())
+        rules = []
+        for e in root.iter():
+            if tag(e) != "style" or not e.text:
+                continue
+            for prelude, body in css_rules(e.text):
+                decls = declarations(body)
+                for sel in split_selectors(prelude):
+                    parts = parse_selector(sel)
+                    if parts and decls:
+                        rules.append((specificity(parts), len(rules), parts, decls))
+        rules.sort(key=lambda r: (r[0], r[1]), reverse=True)
+        self.matched = {e: [r for r in rules if self.matches(r[2], len(r[2]) - 1, e)] for e in root.iter()}
+        self.inline = {e: declarations(e.get("style", "")) for e in root.iter()}
+
+    def keep_values(self, root):
+        after = Sheet(root)
+        for el, then in self.matched.items():
+            now = after.matched.get(el, [])
+            changed = {r[1] for r in then} ^ {r[1] for r in now}
+            if not changed:
+                continue
+            set_here = {p for p, v in declarations(el.get("style", "")).items() if self.inline[el].get(p) != v}
+            for prop in sorted({p for r in then + now if r[1] in changed for p in r[3]} - set_here):
+                want = self.cascade(el, prop, then)
+                if want == after.cascade(el, prop, now):
+                    continue
+                value = INITIAL.get(prop, "inherit") if want is None else want
+                if prop in PRESENTATION and prop not in declarations(el.get("style", "")) and not any(prop in r[3] for r in now):
+                    el.set(prop, value)
+                else:
+                    add_style(el, f"{prop}:{value}{' !important' if any(r[3].get(prop, ('', False))[1] for r in now) else ''}")
+
+    def cascade(self, el, prop, rules):
+        own = declarations(el.get("style", ""))
+        for important in (True, False):
+            if prop in own and own[prop][1] == important:
+                return own[prop][0]
+            for rule in rules:
+                if prop in rule[3] and rule[3][prop][1] == important:
+                    return rule[3][prop][0]
+        return el.get(prop)
 
     def get(self, el, prop):
-        own = declarations(el.get("style", ""))
-        if prop in own:
-            return own[prop]
-        return el.get(prop)
+        return self.cascade(el, prop, self.matched.get(el, []))
 
     def inherited(self, el, prop):
         while el is not None:
@@ -277,6 +441,44 @@ class Sheet:
 
     def has_marker(self, el, props=("marker-start", "marker-mid", "marker-end")):
         return any(self.inherited(el, p) not in (None, "none") for p in props)
+
+    def simple(self, comp, el):
+        if comp["type"] not in (None, "*") and comp["type"] != tag(el):
+            return False
+        if any(el.get("id") != i for i in comp["ids"]):
+            return False
+        classes = el.get("class", "").split()
+        if any(c not in classes for c in comp["classes"]):
+            return False
+        if not all(attr_matches(el.get(name), op, want) for name, op, want in comp["attrs"]):
+            return False
+        parent = self.parent.get(el)
+        for p in comp["pseudos"]:
+            if p == ":root" and el is not self.root:
+                return False
+            if p != ":root" and (parent is None or el is not parent[0 if p == ":first-child" else -1]):
+                return False
+        return True
+
+    def matches(self, parts, i, el):
+        if not self.simple(parts[i][1], el):
+            return False
+        if i == 0:
+            return True
+        comb = parts[i][0]
+        parent = self.parent.get(el)
+        if comb in (">", " "):
+            while parent is not None:
+                if self.matches(parts, i - 1, parent):
+                    return True
+                if comb == ">":
+                    return False
+                parent = self.parent.get(parent)
+            return False
+        before = [] if parent is None else list(parent)[: list(parent).index(el)]
+        if comb == "+":
+            before = before[-1:]
+        return any(self.matches(parts, i - 1, s) for s in before)
 
 
 def shape_animated(el):
@@ -491,7 +693,7 @@ class Rougher:
             el.set("d", self.rough_segments(segs))
 
     def keep_unfilled(self, el, runs):
-        if not self.sheet.styled and self.sheet.inherited(el, "fill") is None and all(flat(run) for run in runs):
+        if self.sheet.inherited(el, "fill") is None and all(flat(run) for run in runs):
             el.set("fill", "none")
 
     def rough_segments(self, segs):
@@ -683,6 +885,7 @@ def main():
     amp = args.amount * math.hypot(w, h) / REF_DIAG * 1.4
     rougher = Rougher(amp, rng, root, box)
     rougher.walk(root, rougher.rem)
+    rougher.sheet.keep_values(root)
     try:
         with open(args.dst, "w", encoding="utf-8", newline="\n") as out:
             tree.write(out, encoding="unicode", xml_declaration=False)
