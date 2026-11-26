@@ -538,12 +538,11 @@ class Rougher:
             return
         if not el.get("rotate"):
             el.set("rotate", " ".join(fmt(self.rng.gauss(0, 2.2 * k)) for _ in range(n)))
-        own = el.get("dy", "")
-        if len(NUM.findall(own)) > 1:
-            return
+        given = [length(v, self.box[3], size) for v in re.split(r"[\s,]+", el.get("dy", "").strip()) if v]
+        given += [0.0] * (n - len(given))
         offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
-        dys = [offs[0] + length(own, self.box[3], size)] + [offs[i] - offs[i - 1] for i in range(1, n)]
-        el.set("dy", " ".join(self.num(d) for d in dys))
+        moves = [offs[0]] + [offs[i] - offs[i - 1] for i in range(1, n)]
+        el.set("dy", " ".join(self.num(d + m) for d, m in zip(given, moves + [0.0] * (len(given) - n))))
 
     def on_canvas(self, size):
         return size * REF_DIAG / self.diag
