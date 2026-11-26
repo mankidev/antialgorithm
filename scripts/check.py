@@ -49,8 +49,9 @@ def cairo_dir():
 
 
 def render(svg_path, png_path, width):
-    if shutil.which("rsvg-convert"):
-        done = subprocess.run(["rsvg-convert", "-w", str(width), svg_path, "-o", png_path], check=False, capture_output=True)
+    rsvg = shutil.which("rsvg-convert")
+    if rsvg:
+        done = subprocess.run([rsvg, "-w", str(width), svg_path, "-o", png_path], check=False, capture_output=True)
         if done.returncode:
             err = " ".join(done.stderr.decode("utf-8", "replace").split())
             sys.exit(f"rsvg-convert could not render the SVG: {err[:300] or 'exit code ' + str(done.returncode)}")
