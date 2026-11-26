@@ -9,6 +9,7 @@ SVG_NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG_NS)
 ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
+MAX_DEPTH = 500
 SKIP = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol", "linearGradient", "radialGradient", "style", "title", "desc"}
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
@@ -375,6 +376,16 @@ class Rougher:
             self.free = was
 
 
+def depth(root):
+    deepest = 0
+    stack = [(root, 1)]
+    while stack:
+        el, d = stack.pop()
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for c in el)
+    return deepest
+
+
 def amount(v):
     try:
         x = float(v)
@@ -395,6 +406,8 @@ def main():
     rng = random.Random(args.seed) if args.seed is not None else random.SystemRandom()
     tree = ET.parse(args.src)
     root = tree.getroot()
+    if depth(root) > MAX_DEPTH:
+        raise SystemExit(f"rough.py: {args.src} nests elements more than {MAX_DEPTH} levels deep; flatten the groups and run it again")
     vb = [float(n) for n in NUM.findall(root.get("viewBox", ""))]
     box = vb if len(vb) == 4 else [0.0, 0.0, fnum(root.get("width"), 600), fnum(root.get("height"), 600)]
     w, h = box[2], box[3]
