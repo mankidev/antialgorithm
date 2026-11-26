@@ -199,10 +199,14 @@ def main():
     ap.add_argument("--small", type=bounded(int, 8, 1024), default=64)
     ap.add_argument("--min-text", type=bounded(float, 0, 100), default=1.2, help="smallest text height as a percent of the image side; about 0.6 for interfaces")
     args = ap.parse_args()
+    tmp = tempfile.mkdtemp()
+    try:
+        check(args, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-    name = os.path.splitext(os.path.basename(args.svg))[0]
-    out = args.out or os.path.join(tempfile.gettempdir(), "antialgorithm_check", name)
-    os.makedirs(out, exist_ok=True)
+
+def check(args, tmp):
     tree = read_svg(args.svg)
     root = tree.getroot()
     vw, vh, (x0, y0, w, h) = canvas(root)
@@ -211,7 +215,6 @@ def main():
     p = round(0.25 * max(args.width, full_h))
     if (args.width + 2 * p) * (full_h + 2 * p) > Image.MAX_IMAGE_PIXELS:
         sys.exit(f"the image is too tall to check at --width {args.width}; use a smaller --width")
-    tmp = tempfile.mkdtemp()
     src = args.svg
     if not renders_as_is(root):
         root.set("width", str(vw))
@@ -219,6 +222,14 @@ def main():
         src = os.path.join(tmp, "sized.svg")
         write(tree, src)
 
+    name = os.path.splitext(os.path.basename(args.svg))[0]
+    if args.out:
+        out = args.out
+        os.makedirs(out, exist_ok=True)
+    else:
+        base = os.path.join(tempfile.gettempdir(), "antialgorithm_check")
+        os.makedirs(base, exist_ok=True)
+        out = tempfile.mkdtemp(prefix=name + "-", dir=base)
     full_png = os.path.join(out, "full.png")
     small_png = os.path.join(out, "small.png")
     render(src, full_png, args.width)
@@ -254,13 +265,11 @@ def main():
             st = t.get("style", "")
             if "filter" in st:
                 t.set("style", re.sub(r"filter\s*:[^;]*;?", "", st))
-        nf_svg = os.path.join(out, "_nofilter.svg")
-        nf_png = os.path.join(out, "_nofilter.png")
+        nf_svg = os.path.join(tmp, "nofilter.svg")
+        nf_png = os.path.join(tmp, "nofilter.png")
         write(nf, nf_svg)
         render(nf_svg, nf_png, args.width)
         plain = flat(nf_png, 255)
-        os.remove(nf_svg)
-        os.remove(nf_png)
 
     problems = []
     if cjk_font_missing(root):
@@ -342,7 +351,6 @@ def main():
             problems.append(f"text '{name}': {cover * 100:.0f}% covered or changed by something drawn over it")
         elif contrast < 30:
             problems.append(f"text '{name}': low contrast with what is behind it ({contrast:.0f}, want 30+)")
-    shutil.rmtree(tmp, ignore_errors=True)
 
     print(f"render: {full_png}")
     print(f"small {args.small}px: {small_png}")
