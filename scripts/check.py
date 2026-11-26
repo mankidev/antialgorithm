@@ -110,6 +110,23 @@ def for_cairo(root):
         up.insert(list(up).index(t), under)
 
 
+def luminance(rgb):
+    c = rgb / 255
+    c = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    return c @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def ratio(a, b):
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def text_contrast(img, mask, ring, cov):
+    behind = img[ring].mean(axis=0)
+    c = cov[mask][:, None]
+    letters = ((img[mask] - (1 - c) * behind) / c).clip(0, 255)
+    return ratio(luminance(letters).mean(), luminance(img[ring]).mean())
+
+
 def flat(png, bg):
     im = np.asarray(Image.open(png).convert("RGBA"), dtype=np.float32)
     a = im[:, :, 3:4] / 255
@@ -418,15 +435,18 @@ def check(args, tmp):
         for dy in (-r, 0, r):
             for dx in (-r, 0, r):
                 ring |= np.roll(np.roll(mask, dy, 0), dx, 1)
+        ring[:ih, :iw] &= inner[:ih, :iw, 3] == 0
         ring &= ~mask
-        lum = lambda c: c @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-        contrast = 255
+        contrast = math.inf
         if ring.any():
-            contrast = max(abs(lum(img[mask]).mean() - lum(img[ring]).mean()) for img in (full, full_dark) if img is not None)
+            cov = np.zeros(full.shape[:2], np.float32)
+            cov[:ih, :iw] = inner[:ih, :iw, 3] / peak
+            contrast = max(text_contrast(img, mask, ring, cov) for img in (full, full_dark) if img is not None)
+        need = 2 if share * 100 >= 2 * args.min_text else 3
         if cover > 0.04:
             problems.append(f"text '{name}': {cover * 100:.0f}% covered or changed by something drawn over it")
-        elif contrast < 30:
-            problems.append(f"text '{name}': low contrast with what is behind it ({contrast:.0f}, want 30+)")
+        elif contrast < need:
+            problems.append(f"text '{name}': low contrast with what is behind it ({contrast:.1f}:1, want {need}:1 or more)")
 
     print(f"render: {full_png}")
     print(f"small {args.small}px: {small_png}")
