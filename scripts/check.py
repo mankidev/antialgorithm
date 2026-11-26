@@ -48,7 +48,7 @@ def cairo_dir():
         os.path.join(apps, "GIMP 3", "bin"), os.path.join(pf, "GIMP 2", "bin"),
         os.path.join(apps, "GIMP 2", "bin"),
     ]
-    return next((d for d in dirs if d and os.path.isfile(os.path.join(d, "libcairo-2.dll"))), None)
+    return next((d for d in dirs if d and os.path.isabs(d) and os.path.isfile(os.path.join(d, "libcairo-2.dll"))), None)
 
 
 def render(svg_path, png_path, width):
