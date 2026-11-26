@@ -188,6 +188,23 @@ def hide(el):
     el.set("style", (st + ";" if st else "") + "display:none")
 
 
+def unfilter(el):
+    el.attrib.pop("filter", None)
+    st = el.get("style", "")
+    if "filter" in st:
+        el.set("style", re.sub(r"filter\s*:[^;]*;?", "", st))
+
+
+def strip(el, hide_shapes):
+    for c in el:
+        if tag(c) in HOLDERS:
+            continue
+        if hide_shapes and tag(c) in SHAPES:
+            hide(c)
+        unfilter(c)
+        strip(c, hide_shapes)
+
+
 def write(tree, path):
     tree.write(path, encoding="unicode")
 
@@ -306,18 +323,11 @@ def check(args, tmp):
             el = parent.get(el)
         return False
 
-    def ancestor_filtered(el):
-        return filtered(parent.get(el))
-
-    own_filter = [has_filter(t) for t in texts(root)]
+    text_filtered = [filtered(t) for t in texts(root)]
     plain = None
-    if any(own_filter):
+    if any(text_filtered):
         nf = copy.deepcopy(tree)
-        for t in texts(nf.getroot()):
-            t.attrib.pop("filter", None)
-            st = t.get("style", "")
-            if "filter" in st:
-                t.set("style", re.sub(r"filter\s*:[^;]*;?", "", st))
+        strip(nf.getroot(), False)
         nf_svg = os.path.join(tmp, "nofilter.svg")
         nf_png = os.path.join(tmp, "nofilter.png")
         write(nf, nf_svg)
@@ -331,20 +341,7 @@ def check(args, tmp):
     for i in range(n):
         solo = copy.deepcopy(tree)
         sroot = solo.getroot()
-        def strip(el):
-            for c in el:
-                if tag(c) in HOLDERS:
-                    continue
-                if tag(c) in SHAPES:
-                    hide(c)
-                if "filter" in c.attrib:
-                    del c.attrib["filter"]
-                st = c.get("style", "")
-                if "filter" in st:
-                    c.set("style", re.sub(r"filter\s*:[^;]*;?", "", st))
-                strip(c)
-
-        strip(sroot)
+        strip(sroot, True)
         for j, t in enumerate(texts(sroot)):
             if j != i:
                 hide(t)
@@ -388,7 +385,7 @@ def check(args, tmp):
             continue
         own = np.zeros_like(full)
         own[:ih, :iw] = inner[:ih, :iw, :3]
-        base = plain if own_filter[i] and plain is not None else full
+        base = plain if text_filtered[i] else full
         cover = (np.abs(base - own).mean(axis=2)[mask] > 60).mean()
         ring = np.zeros_like(mask)
         r = max(2, int(3 * sx))
@@ -400,7 +397,7 @@ def check(args, tmp):
         contrast = 255
         if ring.any():
             contrast = max(abs(lum(img[mask]).mean() - lum(img[ring]).mean()) for img in (full, full_dark) if img is not None)
-        if cover > 0.04 and not ancestor_filtered(texts(root)[i]):
+        if cover > 0.04:
             problems.append(f"text '{name}': {cover * 100:.0f}% covered or changed by something drawn over it")
         elif contrast < 30:
             problems.append(f"text '{name}': low contrast with what is behind it ({contrast:.0f}, want 30+)")
