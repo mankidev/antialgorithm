@@ -634,6 +634,20 @@ def depth(root):
     return deepest
 
 
+def read_svg(path):
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise SystemExit(f"rough.py: cannot open {path}: {e.strerror}")
+    if data[:2] == b"\x1f\x8b":
+        raise SystemExit(f"rough.py: {path} is gzip-compressed (svgz); unzip it to a plain .svg first")
+    try:
+        return ET.ElementTree(ET.fromstring(data))
+    except ET.ParseError as e:
+        raise SystemExit(f"rough.py: {path} is not valid SVG XML: {e}")
+
+
 def amount(v):
     try:
         x = float(v)
@@ -652,7 +666,7 @@ def main():
     ap.add_argument("--seed", type=int)
     args = ap.parse_args()
     rng = random.Random(args.seed) if args.seed is not None else random.SystemRandom()
-    tree = ET.parse(args.src)
+    tree = read_svg(args.src)
     root = tree.getroot()
     if depth(root) > MAX_DEPTH:
         raise SystemExit(f"rough.py: {args.src} nests elements more than {MAX_DEPTH} levels deep; flatten the groups and run it again")
@@ -664,7 +678,10 @@ def main():
     amp = args.amount * math.hypot(w, h) / REF_DIAG * 1.4
     rougher = Rougher(amp, rng, root, box)
     rougher.walk(root, rougher.font_of(root, 16.0))
-    tree.write(args.dst, encoding="unicode", xml_declaration=False)
+    try:
+        tree.write(args.dst, encoding="unicode", xml_declaration=False)
+    except OSError as e:
+        raise SystemExit(f"rough.py: cannot write {args.dst}: {e.strerror}")
     print(f"wrote {args.dst} (amp {amp:.3g})")
 
 
