@@ -13,6 +13,8 @@ def main():
     ap.add_argument("text", nargs="*")
     ap.add_argument("--last", type=int, default=12)
     args = ap.parse_args()
+    if args.last < 1:
+        ap.error("--last must be 1 or more")
     if args.action == "add":
         text = " ".join(args.text).strip()
         if not text:
