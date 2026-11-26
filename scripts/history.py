@@ -3,8 +3,25 @@ import os
 import shutil
 import time
 
-STATE = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-PATH = os.environ.get("ANTIALGORITHM_HISTORY") or os.path.join(STATE, "antialgorithm", "history.jsonl")
+
+def state_dir():
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    if os.path.isabs(xdg):
+        return xdg
+    return os.path.join(os.path.expanduser("~"), ".local", "state")
+
+
+def history_path():
+    custom = os.environ.get("ANTIALGORITHM_HISTORY")
+    if not custom:
+        return os.path.join(state_dir(), "antialgorithm", "history.jsonl")
+    custom = os.path.abspath(os.path.expanduser(custom))
+    if os.path.isdir(custom):
+        return os.path.join(custom, "history.jsonl")
+    return custom
+
+
+PATH = history_path()
 OLD_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "history.jsonl")
 LIMIT = 300
 
