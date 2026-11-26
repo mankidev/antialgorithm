@@ -28,7 +28,7 @@ They should run on Linux, macOS and Windows. Use `os.path` for paths and open te
 
 The code has no comments or docstrings. Pick clear names instead, and put the reasoning in the pull request description.
 
-Before you open a pull request, run the parts you touched:
+Before you open a pull request, run the parts you touched. On Windows, use python or py if python3 is not found.
 
 ```
 python3 scripts/seed.py visual --no-log
