@@ -60,10 +60,53 @@ def render(svg_path, png_path, width):
         import cairosvg
     except (ImportError, OSError):
         sys.exit("needs rsvg-convert, or the cairosvg python package with a cairo library it can load")
+    tree = read_svg(svg_path)
+    for_cairo(tree.getroot())
     try:
-        cairosvg.svg2png(url=svg_path, write_to=png_path, output_width=width)
+        cairosvg.svg2png(bytestring=ET.tostring(tree.getroot()), url=svg_path, write_to=png_path, output_width=width)
     except (ValueError, TypeError, LookupError, ArithmeticError, SyntaxError, OSError, MemoryError) as e:
         sys.exit(f"cairosvg could not render the SVG: {' '.join(str(e).split())[:300] or type(e).__name__}")
+
+
+def style_value(el, prop):
+    value = el.get(prop)
+    for decl in el.get("style", "").split(";"):
+        k, _, v = decl.partition(":")
+        if k.strip() == prop:
+            value = v.strip()
+    return value
+
+
+def add_style(el, decl):
+    st = el.get("style", "")
+    el.set("style", (st + ";" if st else "") + decl)
+
+
+def stroke_first(order):
+    words = [w for w in (order or "").split() if w in ("fill", "stroke", "markers")]
+    words += [w for w in ("fill", "stroke", "markers") if w not in words]
+    return words.index("stroke") < words.index("fill")
+
+
+def for_cairo(root):
+    if style_value(root, "text-rendering") is None:
+        root.set("text-rendering", "optimizeSpeed")
+    parent = {c: p for p in root.iter() for c in p}
+    for t in texts(root):
+        el, order = t, None
+        while el is not None and order is None:
+            order = style_value(el, "paint-order")
+            el = parent.get(el)
+        if not stroke_first(order):
+            continue
+        under = copy.deepcopy(t)
+        for e in under.iter():
+            e.attrib.pop("id", None)
+            add_style(e, "fill:none")
+        for e in t.iter():
+            add_style(e, "stroke:none")
+        up = parent[t]
+        up.insert(list(up).index(t), under)
 
 
 def flat(png, bg):
