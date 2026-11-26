@@ -68,8 +68,11 @@ def retry_denied(action):
 
 
 def read_text():
-    with open(PATH, encoding="utf-8-sig", errors="replace", newline="") as f:
-        return f.read()
+    with open(PATH, "rb") as f:
+        data = f.read()
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    return data.decode("utf-8-sig", errors="surrogateescape")
 
 
 def migrate():
@@ -85,13 +88,17 @@ def migrate():
         release(lock)
 
 
-def read():
+def read_lines():
     try:
-        lines = retry_denied(read_text).split("\n")
+        text = retry_denied(read_text)
     except FileNotFoundError:
         return []
+    return [line.rstrip("\r") for line in text.split("\n") if line.strip()]
+
+
+def read():
     out = []
-    for line in lines:
+    for line in read_lines():
         try:
             entry = json.loads(line)
         except ValueError:
@@ -118,12 +125,11 @@ def add(entry):
     lock = PATH + ".lock"
     acquire(lock)
     try:
-        rows = read()[-(LIMIT - 1):] + [entry]
+        lines = read_lines()[-(LIMIT - 1):] + [json.dumps(entry, ensure_ascii=False)]
         tmp = f"{PATH}.{os.getpid()}.tmp"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                for row in rows:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+                f.writelines(line + "\n" for line in lines)
             retry_denied(lambda: os.replace(tmp, PATH))
         finally:
             if os.path.exists(tmp):
