@@ -35,7 +35,7 @@ def migrate():
 def load(kind=None):
     migrate()
     try:
-        with open(PATH, encoding="utf-8-sig", newline="") as f:
+        with open(PATH, encoding="utf-8-sig", errors="replace", newline="") as f:
             lines = f.read().split("\n")
     except FileNotFoundError:
         return []
@@ -45,7 +45,7 @@ def load(kind=None):
             entry = json.loads(line)
         except ValueError:
             continue
-        if kind is None or entry.get("type") == kind:
+        if isinstance(entry, dict) and (kind is None or entry.get("type") == kind):
             out.append(entry)
     return out
 

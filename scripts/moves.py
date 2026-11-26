@@ -20,7 +20,7 @@ def main():
         history.add({"type": "move", "move": text})
         print(f"saved: {text}")
         return
-    rows = history.load("move")[-args.last:]
+    rows = [r for r in history.load("move") if isinstance(r.get("move"), str)][-args.last:]
     if not rows:
         print("no moves saved yet")
         return

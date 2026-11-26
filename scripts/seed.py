@@ -11,8 +11,11 @@ RECENT = {}
 
 def load_recent(seeds=12):
     RECENT.clear()
-    for entry in reversed(history.load("seed")[-seeds:]):
-        for axis, value in entry.get("seed", {}).items():
+    valid = [e["seed"] for e in history.load("seed") if isinstance(e.get("seed"), dict)]
+    for seed in reversed(valid[-seeds:]):
+        for axis, value in seed.items():
+            if not isinstance(value, str):
+                continue
             RECENT.setdefault(axis, [])
             if value not in RECENT[axis]:
                 RECENT[axis].append(value)
