@@ -11,8 +11,11 @@ RECENT = {}
 
 def load_recent(seeds=12):
     RECENT.clear()
-    for entry in reversed(history.load("seed")[-seeds:]):
-        for axis, value in entry.get("seed", {}).items():
+    valid = [e["seed"] for e in history.load("seed") if isinstance(e.get("seed"), dict)]
+    for seed in reversed(valid[-seeds:]):
+        for axis, value in seed.items():
+            if not isinstance(value, str):
+                continue
             RECENT.setdefault(axis, [])
             if value not in RECENT[axis]:
                 RECENT[axis].append(value)
@@ -208,6 +211,12 @@ def pools(kind):
     return dict(IDEA)
 
 
+def rolled_axes(only, keep):
+    if only == "method" and "color" not in keep:
+        return ["method", "color"]
+    return [only]
+
+
 def roll_once(kind, keep, only=None):
     out = {}
     for name, items in pools(kind).items():
@@ -223,10 +232,24 @@ def roll_once(kind, keep, only=None):
         out["anchor"] = pick("anchor", ANCHOR)
     out.update(keep)
     if only:
-        out = {k: v for k, v in out.items() if k in keep or k == only}
+        out = {k: v for k, v in out.items() if k in keep or k in rolled_axes(only, keep)}
     if out.get("method") in FIXED_COLOR and "color" in out and "color" not in keep:
         out["color"] = "the method's own colors"
     return out
+
+
+def known_values(axis):
+    values = {**VISUAL, **TEXT, **IDEA, "setting": SETTING, "region": REGION, "anchor": ANCHOR + NO_ANCHOR}
+    values["method"] = [m for items in METHOD_FAMILIES.values() for m in items]
+    values["color"] = VISUAL["color"] + ["the method's own colors"]
+    return values.get(axis, [])
+
+
+def canonical(axis, value):
+    for known in known_values(axis):
+        if known.casefold() == value.casefold():
+            return known
+    return value
 
 
 def axes_of(kind):
@@ -243,6 +266,8 @@ def roll(kind, keep=None, only=None):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("kind", nargs="?", default="visual", choices=["visual", "text", "idea"])
     ap.add_argument("--only", help="roll one axis again, for example --only method")
@@ -255,7 +280,9 @@ def main():
         k, sep, v = item.partition("=")
         if not sep:
             sys.exit(f"--keep needs axis=value, got '{item}'")
-        keep[k.strip()] = v.strip()
+        if not v.strip():
+            sys.exit(f"--keep needs a value after '=', got '{item}'")
+        keep[k.strip()] = canonical(k.strip(), v.strip())
     axes = axes_of(args.kind)
     for name in [*keep, *([args.only] if args.only else [])]:
         if name not in axes:
@@ -264,11 +291,14 @@ def main():
         keep.pop(args.only, None)
     seed = roll(args.kind, keep, args.only)
     if args.only:
-        seed = {args.only: seed[args.only]}
+        seed = {k: seed[k] for k in rolled_axes(args.only, keep)}
     for k, v in seed.items():
         print(f"{k}: {v}")
     if not args.no_log:
-        history.add({"type": "seed", "kind": args.kind, "seed": seed})
+        try:
+            history.add({"type": "seed", "kind": args.kind, "seed": seed})
+        except OSError as e:
+            print(f"could not save the seed to the history: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
