@@ -16,6 +16,7 @@ from PIL import Image
 SVG_NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG_NS)
 ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 SHAPES = {"rect", "circle", "ellipse", "line", "polyline", "polygon", "path", "image", "use"}
 HOLDERS = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol"}
@@ -195,16 +196,23 @@ def drop(el, prop):
         el.set("style", re.sub(prop + r"\s*:[^;]*;?", "", st))
 
 
-def strip(el, solo):
+def text_paths(root):
+    refs = (el.get("href") or el.get(XLINK_HREF) or "" for el in root.iter() if tag(el) == "textPath")
+    return {r[1:] for r in refs if r.startswith("#")}
+
+
+def strip(el, solo, keep=()):
     for c in el:
         if tag(c) in HOLDERS:
             continue
         if solo:
-            if tag(c) in SHAPES:
+            if tag(c) in SHAPES and c.get("id") in keep:
+                add_style(c, "opacity:0")
+            elif tag(c) in SHAPES:
                 hide(c)
             drop(c, "clip-path")
         drop(c, "filter")
-        strip(c, solo)
+        strip(c, solo, keep)
 
 
 def write(tree, path):
@@ -340,10 +348,13 @@ def check(args, tmp):
     for lang in cjk_fonts_missing(root):
         problems.append(f"{lang} text found but no installed font has its characters, so it may render as empty boxes (install {CJK_FONT[lang]})")
     n = len(texts(root))
+    paths = text_paths(root)
+    on_path = [any(tag(e) == "textPath" for e in t.iter()) for t in texts(root)]
+    unseen = []
     for i in range(n):
         solo = copy.deepcopy(tree)
         sroot = solo.getroot()
-        strip(sroot, True)
+        strip(sroot, True, paths)
         for j, t in enumerate(texts(sroot)):
             if j != i:
                 hide(t)
@@ -358,6 +369,9 @@ def check(args, tmp):
         a = np.asarray(Image.open(pp).convert("RGBA"))[:, :, 3]
         ys, xs = np.nonzero(a > 40)
         name = label(texts(root)[i])
+        if len(xs) == 0 and on_path[i] and shutil.which("rsvg-convert"):
+            unseen.append(name)
+            continue
         if len(xs) == 0:
             problems.append(f"text '{name}': draws nothing")
             continue
@@ -406,9 +420,11 @@ def check(args, tmp):
 
     print(f"render: {full_png}")
     print(f"small {args.small}px: {small_png}")
-    print(f"texts checked: {n}")
+    print(f"texts checked: {n - len(unseen)}")
     if clear:
         print("background has see-through parts; contrast was measured on white and on black, the better one counts")
+    for name in unseen:
+        print(f"not checked: text '{name}' is on a textPath, which rsvg-convert does not draw, so it is also missing from the renders; check it by eye")
     if problems:
         print("problems:")
         for pr in problems:
