@@ -274,6 +274,7 @@ class Rougher:
     def __init__(self, amp, rng, root, box):
         self.base_amp = amp
         self.base_diag = math.hypot(box[2], box[3])
+        self.amount = amp * REF_DIAG / (1.4 * self.base_diag)
         self.scale = self.outer_scale = 1.0
         self.rng = rng
         self.root = root
@@ -419,15 +420,21 @@ class Rougher:
             rx, ry = self.size(el, "rx", 0), self.size(el, "ry", 1)
         if not self.fits(cx, cy, rx, ry) or rx <= 0 or ry <= 0:
             return
-        n = max(12, int(2 * math.pi * max(rx, ry) / (self.amp * 10 + 1e-6)))
-        n = min(n, 160)
+        reach = max(rx, ry)
+        n = max(8, min(24, int(math.tau * reach / max(self.amp * 25, self.diag / 60, 1e-9))))
         drift = self.rng.uniform(0, math.tau)
         pts = []
         for k in range(n):
             a = math.tau * k / n
-            r = 1 + 0.5 * self.j(1 / max(rx, ry)) + 0.015 * math.sin(3 * a + drift)
+            r = 1 + 0.5 * self.j(1 / reach) + 0.015 * self.amount * math.sin(3 * a + drift)
             pts.append((cx + rx * r * math.cos(a), cy + ry * r * math.sin(a)))
-        d = "M" + " L".join(self.pt(p) for p in pts) + "Z"
+        d = "M" + self.pt(pts[0])
+        for i in range(n):
+            before, a, b, after = pts[i - 1], pts[i], pts[(i + 1) % n], pts[(i + 2) % n]
+            c1 = (a[0] + (b[0] - before[0]) / 6, a[1] + (b[1] - before[1]) / 6)
+            c2 = (b[0] - (after[0] - a[0]) / 6, b[1] - (after[1] - a[1]) / 6)
+            d += f" C{self.pt(c1)} {self.pt(c2)} {self.pt(b)}"
+        d += "Z"
         small = max(rx, ry) < self.amp * 6
         self.to_path(el, d)
         if small:
