@@ -57,15 +57,19 @@ def release(lock):
         pass
 
 
-def replace(tmp):
+def retry_denied(action):
     for attempt in range(50):
         try:
-            os.replace(tmp, PATH)
-            return
+            return action()
         except PermissionError:
             if attempt == 49:
                 raise
             time.sleep(0.02)
+
+
+def read_text():
+    with open(PATH, encoding="utf-8-sig", errors="replace", newline="") as f:
+        return f.read()
 
 
 def migrate():
@@ -83,8 +87,7 @@ def migrate():
 
 def read():
     try:
-        with open(PATH, encoding="utf-8-sig", errors="replace", newline="") as f:
-            lines = f.read().split("\n")
+        lines = retry_denied(read_text).split("\n")
     except FileNotFoundError:
         return []
     out = []
@@ -121,7 +124,7 @@ def add(entry):
             with open(tmp, "w", encoding="utf-8") as f:
                 for row in rows:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            replace(tmp)
+            retry_denied(lambda: os.replace(tmp, PATH))
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
