@@ -133,7 +133,8 @@ def main():
     root = tree.getroot()
     x0, y0, w, h = size_of(root)
     scale = args.width / w
-    pad = 0.25 * max(w, h)
+    p = round(0.25 * max(w, h) * scale)
+    pad = p / scale
 
     full_png = os.path.join(out, "full.png")
     small_png = os.path.join(out, "small.png")
@@ -206,14 +207,13 @@ def main():
         sp = os.path.join(tmp, f"s{i}.svg")
         write(solo, sp)
         pp = os.path.join(tmp, f"s{i}.png")
-        render(sp, pp, int(round((w + 2 * pad) * scale)))
+        render(sp, pp, args.width + 2 * p)
         a = np.asarray(Image.open(pp).convert("RGBA"))[:, :, 3]
         ys, xs = np.nonzero(a > 40)
         name = label(texts(root)[i])
         if len(xs) == 0:
             problems.append(f"text '{name}': draws nothing")
             continue
-        p = int(round(pad * scale))
         cw, ch = full.shape[1], full.shape[0]
         sides = []
         if xs.min() < p:
