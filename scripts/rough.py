@@ -93,6 +93,54 @@ def split_cubic(p0, c1, c2, p1):
     return (p0, a, d, m), (m, e, c, p1)
 
 
+def arc_cubics(p0, rx, ry, rot, large, sweep, p1):
+    straight = [(lerp(p0, p1, 1 / 3), lerp(p0, p1, 2 / 3), p1)]
+    if p0 == p1:
+        return []
+    rx, ry = abs(rx), abs(ry)
+    if not finite(*p0, *p1, rx, ry, rot) or rx == 0 or ry == 0:
+        return straight
+    cos, sin = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    hx, hy = (p0[0] - p1[0]) / 2, (p0[1] - p1[1]) / 2
+    x1, y1 = cos * hx + sin * hy, -sin * hx + cos * hy
+    grow = (x1 / rx) * (x1 / rx) + (y1 / ry) * (y1 / ry)
+    if grow > 1:
+        rx, ry = rx * math.sqrt(grow), ry * math.sqrt(grow)
+    ax, ay = rx * y1, ry * x1
+    top = rx * ry * rx * ry - ax * ax - ay * ay
+    bottom = ax * ax + ay * ay
+    co = math.sqrt(max(0.0, top / bottom)) if bottom else 0.0
+    co = -co if large == sweep else co
+    ux, uy = co * rx * y1 / ry, -co * ry * x1 / rx
+    cx = cos * ux - sin * uy + (p0[0] + p1[0]) / 2
+    cy = sin * ux + cos * uy + (p0[1] + p1[1]) / 2
+    t1 = math.atan2((y1 - uy) / ry, (x1 - ux) / rx)
+    turn = math.atan2((-y1 - uy) / ry, (-x1 - ux) / rx) - t1
+    if sweep and turn < 0:
+        turn += math.tau
+    elif not sweep and turn > 0:
+        turn -= math.tau
+    if not finite(cx, cy, turn):
+        return straight
+    n = max(1, math.ceil(abs(turn) / (math.pi / 2) - 1e-9))
+    step = turn / n
+    k = 4 / 3 * math.tan(step / 4)
+
+    def at(t):
+        return (cx + rx * math.cos(t) * cos - ry * math.sin(t) * sin, cy + rx * math.cos(t) * sin + ry * math.sin(t) * cos)
+
+    def towards(t):
+        return (-rx * math.sin(t) * cos - ry * math.cos(t) * sin, -rx * math.sin(t) * sin + ry * math.cos(t) * cos)
+
+    out = []
+    for i in range(n):
+        a, b = t1 + i * step, t1 + (i + 1) * step
+        pa, pb, da, db = at(a), at(b), towards(a), towards(b)
+        end = p1 if i == n - 1 else pb
+        out.append(((pa[0] + k * da[0], pa[1] + k * da[1]), (pb[0] - k * db[0], pb[1] - k * db[1]), end))
+    return out
+
+
 def parse_path(d):
     toks = TOK.findall(d)
     segs = []
@@ -167,7 +215,7 @@ def parse_path(d):
             new_q = q1
         else:
             p = (a[5] + ox, a[6] + oy)
-            segs.append(("A", a[0], a[1], a[2], int(a[3]), int(a[4]), p))
+            segs.extend(("C", c1, c2, end) for c1, c2, end in arc_cubics(cur, a[0], a[1], a[2], a[3] != 0, a[4] != 0, p))
         cur = p
         last_c, last_q = new_c, new_q
     return segs
@@ -394,7 +442,7 @@ class Rougher:
         segs = parse_path(el.get("d", ""))
         if not segs or segs[0][0] != "M":
             return
-        coords = [v for s in segs for p in s[1:] for v in (p if isinstance(p, tuple) else (p,))]
+        coords = [v for s in segs for p in s[1:] for v in p]
         if not self.fits(*coords):
             return
         out = []
@@ -414,11 +462,6 @@ class Rougher:
                 jend = self.jp(s[3])
                 self.curve(out, (cur, s[1], s[2], s[3]), jcur, jend)
                 cur, jcur = s[3], jend
-            elif kind == "A":
-                _, rx, ry, rot, large, sweep, p = s
-                jcur = self.jp(p)
-                out.append(f"A{self.num(rx)} {self.num(ry)} {fmt(rot)} {large} {sweep} {self.pt(jcur)}")
-                cur = p
             else:
                 self.straight(out, cur, start)
                 out.append("Z")
