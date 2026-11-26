@@ -10,8 +10,11 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
-import numpy as np
-from PIL import Image
+try:
+    import numpy as np
+    from PIL import Image
+except ImportError as missing:
+    sys.exit(f"check.py needs the numpy and Pillow packages ({missing})")
 
 SVG_NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG_NS)
