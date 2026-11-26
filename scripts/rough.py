@@ -61,6 +61,17 @@ def font_px(v, parent, rem=16.0):
     return length(v, parent, parent, parent, rem)
 
 
+def font_shorthand_size(v):
+    for word in v.split():
+        size = word.split("/")[0].lower()
+        if size in FONT_KEYWORDS or size in ("smaller", "larger"):
+            return size
+        m = LENGTH.match(size)
+        if m and m.group(2):
+            return size
+    return None
+
+
 def declarations(body):
     out = {}
     for part in body.split(";"):
@@ -69,6 +80,8 @@ def declarations(body):
         key, value = (s.strip() for s in part.split(":", 1))
         important = bool(IMPORTANT.search(value))
         key, value = key.lower(), IMPORTANT.sub("", value).strip()
+        if key == "font":
+            key, value = "font-size", font_shorthand_size(value)
         if not value:
             continue
         for name in ("marker-start", "marker-mid", "marker-end") if key == "marker" else (key,):
