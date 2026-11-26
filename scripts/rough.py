@@ -16,7 +16,7 @@ SKIP = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol", "li
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s*$")
-UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6, "rem": 16.0}
+UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6}
 TRANSFORM = re.compile(r"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)")
 FONT_KEYWORDS = {"xx-small": 9.0, "x-small": 10.0, "small": 13.0, "medium": 16.0, "large": 18.0, "x-large": 24.0, "xx-large": 32.0}
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
@@ -33,25 +33,27 @@ def fnum(v, default=0.0):
     return float(m.group()) if m else default
 
 
-def length(v, ref=0.0, font=16.0, default=0.0):
+def length(v, ref=0.0, font=16.0, default=0.0, rem=16.0):
     m = LENGTH.match(str(v)) if v is not None else None
     if not m:
         return default
     x, unit = float(m.group(1)), m.group(2).lower()
     if unit == "%":
         return x * ref / 100
+    if unit == "rem":
+        return x * rem
     if unit in ("em", "ex"):
         return x * font * (0.5 if unit == "ex" else 1)
     return x * UNIT_PX[unit] if unit in UNIT_PX else default
 
 
-def font_px(v, parent):
+def font_px(v, parent, rem=16.0):
     v = (v or "").strip().lower()
     if v in FONT_KEYWORDS:
         return FONT_KEYWORDS[v]
     if v in ("smaller", "larger"):
         return parent / 1.2 if v == "smaller" else parent * 1.2
-    return length(v, parent, parent, parent)
+    return length(v, parent, parent, parent, rem)
 
 
 def declarations(body):
@@ -293,12 +295,13 @@ class Rougher:
         self.font = 16.0
         self.whole = False
         self.sheet = Sheet(root)
+        self.rem = font_px(self.sheet.get(root, "font-size"), 16.0)
         self.filters = {}
 
     def size(self, el, key, axis):
         _, _, w, h = self.box
         ref = (w, h, math.hypot(w, h) / math.sqrt(2))[axis]
-        return length(el.get(key), ref, self.font)
+        return length(el.get(key), ref, self.font, rem=self.rem)
 
     @property
     def amp(self):
@@ -538,7 +541,7 @@ class Rougher:
             return
         if not el.get("rotate"):
             el.set("rotate", " ".join(fmt(self.rng.gauss(0, 2.2 * k)) for _ in range(n)))
-        given = [length(v, self.box[3], size) for v in re.split(r"[\s,]+", el.get("dy", "").strip()) if v]
+        given = [length(v, self.box[3], size, rem=self.rem) for v in re.split(r"[\s,]+", el.get("dy", "").strip()) if v]
         given += [0.0] * (n - len(given))
         offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
         moves = [offs[0]] + [offs[i] - offs[i - 1] for i in range(1, n)]
@@ -552,7 +555,7 @@ class Rougher:
         return 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
 
     def font_of(self, el, parent):
-        return font_px(self.sheet.get(el, "font-size"), parent)
+        return font_px(self.sheet.get(el, "font-size"), parent, self.rem)
 
     def text(self, el, size):
         if not list(el):
@@ -676,7 +679,7 @@ def main():
         raise SystemExit(f"rough.py: the canvas size {fmt(w)} x {fmt(h)} from viewBox or width/height is not usable")
     amp = args.amount * math.hypot(w, h) / REF_DIAG * 1.4
     rougher = Rougher(amp, rng, root, box)
-    rougher.walk(root, rougher.font_of(root, 16.0))
+    rougher.walk(root, rougher.rem)
     try:
         tree.write(args.dst, encoding="unicode", xml_declaration=False)
     except OSError as e:
