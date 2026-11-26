@@ -24,16 +24,63 @@ def history_path():
 PATH = history_path()
 OLD_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "history.jsonl")
 LIMIT = 300
+LOCK_WAIT = 15
+LOCK_STALE = 10
+
+
+def acquire(lock):
+    deadline = time.monotonic() + LOCK_WAIT
+    while time.monotonic() < deadline:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return
+        except FileExistsError:
+            pass
+        except PermissionError:
+            if os.name != "nt":
+                raise
+        try:
+            if time.time() - os.path.getmtime(lock) > LOCK_STALE:
+                os.remove(lock)
+                continue
+        except (FileNotFoundError, PermissionError):
+            pass
+        time.sleep(0.02)
+    raise TimeoutError(f"could not create the lock file {lock} within {LOCK_WAIT} s")
+
+
+def release(lock):
+    try:
+        os.remove(lock)
+    except FileNotFoundError:
+        pass
+
+
+def replace(tmp):
+    for attempt in range(50):
+        try:
+            os.replace(tmp, PATH)
+            return
+        except PermissionError:
+            if attempt == 49:
+                raise
+            time.sleep(0.02)
 
 
 def migrate():
-    if not os.path.exists(PATH) and os.path.exists(OLD_PATH):
-        os.makedirs(os.path.dirname(PATH), exist_ok=True)
-        shutil.copyfile(OLD_PATH, PATH)
+    if os.path.exists(PATH) or not os.path.exists(OLD_PATH):
+        return
+    os.makedirs(os.path.dirname(PATH), exist_ok=True)
+    lock = PATH + ".lock"
+    acquire(lock)
+    try:
+        if not os.path.exists(PATH):
+            shutil.copyfile(OLD_PATH, PATH)
+    finally:
+        release(lock)
 
 
-def load(kind=None):
-    migrate()
+def read():
     try:
         with open(PATH, encoding="utf-8-sig", errors="replace", newline="") as f:
             lines = f.read().split("\n")
@@ -45,17 +92,32 @@ def load(kind=None):
             entry = json.loads(line)
         except ValueError:
             continue
-        if isinstance(entry, dict) and (kind is None or entry.get("type") == kind):
+        if isinstance(entry, dict):
             out.append(entry)
     return out
 
 
+def load(kind=None):
+    migrate()
+    return [e for e in read() if kind is None or e.get("type") == kind]
+
+
 def add(entry):
     entry = {"date": time.strftime("%Y-%m-%d"), **entry}
-    rows = load()[-(LIMIT - 1):] + [entry]
+    migrate()
     os.makedirs(os.path.dirname(PATH), exist_ok=True)
-    tmp = PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    os.replace(tmp, PATH)
+    lock = PATH + ".lock"
+    acquire(lock)
+    try:
+        rows = read()[-(LIMIT - 1):] + [entry]
+        tmp = f"{PATH}.{os.getpid()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            replace(tmp)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    finally:
+        release(lock)
