@@ -273,7 +273,10 @@ def main():
     for k, v in seed.items():
         print(f"{k}: {v}")
     if not args.no_log:
-        history.add({"type": "seed", "kind": args.kind, "seed": seed})
+        try:
+            history.add({"type": "seed", "kind": args.kind, "seed": seed})
+        except OSError as e:
+            print(f"could not save the seed to the history: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

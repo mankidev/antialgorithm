@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sys
 import time
 
 
@@ -98,8 +99,13 @@ def read():
 
 
 def load(kind=None):
-    migrate()
-    return [e for e in read() if kind is None or e.get("type") == kind]
+    try:
+        migrate()
+        rows = read()
+    except OSError as e:
+        print(f"could not read the history: {e}", file=sys.stderr)
+        return []
+    return [row for row in rows if kind is None or row.get("type") == kind]
 
 
 def add(entry):

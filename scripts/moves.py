@@ -17,7 +17,10 @@ def main():
         text = " ".join(args.text).strip()
         if not text:
             sys.exit("add needs the move, for example: moves.py add \"poster: x-ray method, deep blue ground\"")
-        history.add({"type": "move", "move": text})
+        try:
+            history.add({"type": "move", "move": text})
+        except OSError as e:
+            sys.exit(f"could not save the move: {e}")
         print(f"saved: {text}")
         return
     rows = [r for r in history.load("move") if isinstance(r.get("move"), str)][-args.last:]
