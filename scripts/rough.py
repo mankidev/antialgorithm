@@ -684,7 +684,8 @@ def main():
     rougher = Rougher(amp, rng, root, box)
     rougher.walk(root, rougher.rem)
     try:
-        tree.write(args.dst, encoding="unicode", xml_declaration=False)
+        with open(args.dst, "w", encoding="utf-8", newline="\n") as out:
+            tree.write(out, encoding="unicode", xml_declaration=False)
     except OSError as e:
         raise SystemExit(f"rough.py: cannot write {args.dst}: {e.strerror}")
     print(f"wrote {args.dst} (amp {amp:.3g})")
