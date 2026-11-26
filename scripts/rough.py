@@ -361,11 +361,21 @@ class Rougher:
             self.free = was
 
 
+def amount(v):
+    try:
+        x = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {v}")
+    if not math.isfinite(x) or x < 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number of 0 or more: {v}")
+    return x
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("dst")
-    ap.add_argument("--amount", type=float, default=1.0)
+    ap.add_argument("--amount", type=amount, default=1.0)
     ap.add_argument("--seed", type=int)
     args = ap.parse_args()
     rng = random.Random(args.seed) if args.seed is not None else random.SystemRandom()
