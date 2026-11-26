@@ -211,6 +211,12 @@ def pools(kind):
     return dict(IDEA)
 
 
+def rolled_axes(only, keep):
+    if only == "method" and "color" not in keep:
+        return ["method", "color"]
+    return [only]
+
+
 def roll_once(kind, keep, only=None):
     out = {}
     for name, items in pools(kind).items():
@@ -226,7 +232,7 @@ def roll_once(kind, keep, only=None):
         out["anchor"] = pick("anchor", ANCHOR)
     out.update(keep)
     if only:
-        out = {k: v for k, v in out.items() if k in keep or k == only}
+        out = {k: v for k, v in out.items() if k in keep or k in rolled_axes(only, keep)}
     if out.get("method") in FIXED_COLOR and "color" in out and "color" not in keep:
         out["color"] = "the method's own colors"
     return out
@@ -269,7 +275,7 @@ def main():
         keep.pop(args.only, None)
     seed = roll(args.kind, keep, args.only)
     if args.only:
-        seed = {args.only: seed[args.only]}
+        seed = {k: seed[k] for k in rolled_axes(args.only, keep)}
     for k, v in seed.items():
         print(f"{k}: {v}")
     if not args.no_log:
