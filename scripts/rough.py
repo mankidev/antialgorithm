@@ -32,6 +32,10 @@ def style_get(el, key):
     return m.group(1).strip() if m else el.get(key)
 
 
+def finite(*xs):
+    return all(math.isfinite(x) for x in xs)
+
+
 def fmt(x):
     return f"{x:.2f}".rstrip("0").rstrip(".")
 
@@ -140,6 +144,10 @@ class Rougher:
         self.free = True
         self.filter_id = None
 
+    def fits(self, *xs):
+        limit = 1e6 * math.hypot(self.box[2], self.box[3])
+        return all(math.isfinite(x) and abs(x) <= limit for x in xs)
+
     def j(self, scale=1.0):
         return self.rng.gauss(0, self.amp * scale)
 
@@ -166,7 +174,7 @@ class Rougher:
 
     def steps(self, a, b):
         shortest = max(self.amp * 18, math.hypot(self.box[2], self.box[3]) / 160, 1e-9)
-        return max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / shortest))
+        return max(1, min(200, int(math.hypot(b[0] - a[0], b[1] - a[1]) / shortest)))
 
     def wobble(self, pts, closed):
         out = []
@@ -195,6 +203,8 @@ class Rougher:
 
     def line(self, el):
         p = [(fnum(el.get("x1")), fnum(el.get("y1"))), (fnum(el.get("x2")), fnum(el.get("y2")))]
+        if not self.fits(*p[0], *p[1]):
+            return
         self.to_path(el, self.wobble(p, False))
         self.shift(el)
 
@@ -202,7 +212,7 @@ class Rougher:
         if fnum(el.get("rx")) or fnum(el.get("ry")):
             return
         x, y, w, h = (fnum(el.get(k)) for k in ("x", "y", "width", "height"))
-        if w <= 0 or h <= 0 or str(el.get("width", "")).endswith("%"):
+        if not self.fits(x, y, w, h) or w <= 0 or h <= 0 or str(el.get("width", "")).endswith("%"):
             return
         if w >= 0.9 * self.box[2] and h >= 0.9 * self.box[3]:
             return
@@ -211,7 +221,7 @@ class Rougher:
     def poly(self, el, closed):
         nums = [float(n) for n in NUM.findall(el.get("points", ""))]
         pts = list(zip(nums[0::2], nums[1::2]))
-        if len(pts) >= 2:
+        if len(pts) >= 2 and self.fits(*nums):
             self.to_path(el, self.wobble(pts, closed))
 
     def ellipse(self, el):
@@ -220,7 +230,7 @@ class Rougher:
             rx = ry = fnum(el.get("r"))
         else:
             rx, ry = fnum(el.get("rx")), fnum(el.get("ry"))
-        if rx <= 0 or ry <= 0:
+        if not self.fits(cx, cy, rx, ry) or rx <= 0 or ry <= 0:
             return
         n = max(12, int(2 * math.pi * max(rx, ry) / (self.amp * 10 + 1e-6)))
         n = min(n, 160)
@@ -258,6 +268,9 @@ class Rougher:
     def path(self, el):
         segs = parse_path(el.get("d", ""))
         if not segs or segs[0][0] != "M":
+            return
+        coords = [v for s in segs for p in s[1:] for v in (p if isinstance(p, tuple) else (p,))]
+        if not self.fits(*coords):
             return
         out = []
         cur = start = (0.0, 0.0)
@@ -385,6 +398,8 @@ def main():
     vb = [float(n) for n in NUM.findall(root.get("viewBox", ""))]
     box = vb if len(vb) == 4 else [0.0, 0.0, fnum(root.get("width"), 600), fnum(root.get("height"), 600)]
     w, h = box[2], box[3]
+    if not finite(*box) or w <= 0 or h <= 0:
+        raise SystemExit(f"rough.py: the canvas size {fmt(w)} x {fmt(h)} from viewBox or width/height is not usable")
     amp = args.amount * math.hypot(w, h) / 720 * 1.4
     Rougher(amp, rng, root, box).walk(root, 16.0)
     tree.write(args.dst, encoding="unicode", xml_declaration=False)
