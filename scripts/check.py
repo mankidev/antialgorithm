@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import copy
+import math
 import os
 import re
 import shutil
@@ -18,6 +19,9 @@ ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 SHAPES = {"rect", "circle", "ellipse", "line", "polyline", "polygon", "path", "image", "use"}
 HOLDERS = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol"}
+LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*(px|pt|pc|in|cm|mm|q|em|ex)?\s*$", re.IGNORECASE)
+UNITS = {"px": 1, "pt": 4 / 3, "pc": 16, "in": 96, "cm": 96 / 2.54, "mm": 96 / 25.4, "q": 96 / 101.6, "em": 16, "ex": 8}
+ALIGN = {"Min": 0.0, "Mid": 0.5, "Max": 1.0}
 
 
 def tag(el):
@@ -62,13 +66,50 @@ def flat(png, bg):
     return im[:, :, :3] * a + bg * (1 - a)
 
 
-def size_of(root):
+def length(value):
+    m = LENGTH.match(value or "")
+    if not m:
+        return None
+    n = float(m.group(1)) * UNITS[(m.group(2) or "px").lower()]
+    return n if 0 < n < math.inf else None
+
+
+def view_box(root):
     vb = [float(n) for n in NUM.findall(root.get("viewBox", ""))]
-    if len(vb) == 4:
-        return vb
-    w = float(NUM.search(root.get("width", "600")).group())
-    h = float(NUM.search(root.get("height", "600")).group())
-    return [0.0, 0.0, w, h]
+    if len(vb) != 4:
+        return None
+    if not all(math.isfinite(v) for v in vb) or vb[2] <= 0 or vb[3] <= 0:
+        sys.exit("the viewBox needs a width and height above zero")
+    return vb
+
+
+def renders_as_is(root):
+    wv, hv = root.get("width"), root.get("height")
+    if length(wv) and length(hv):
+        return True
+    return view_box(root) is not None and all(v is None or v.strip().endswith("%") for v in (wv, hv))
+
+
+def canvas(root):
+    vb = view_box(root)
+    w, h = length(root.get("width")), length(root.get("height"))
+    if vb is None:
+        if w is None or h is None:
+            sys.exit('the SVG has no viewBox and no width and height, so its canvas size is unknown; add viewBox="0 0 W H"')
+        return w, h, [0.0, 0.0, w, h]
+    if w is None and h is None:
+        w, h = vb[2], vb[3]
+    elif w is None:
+        w = h * vb[2] / vb[3]
+    elif h is None:
+        h = w * vb[3] / vb[2]
+    words = root.get("preserveAspectRatio", "").replace("defer", "").split()
+    if words[:1] == ["none"]:
+        return w, h, vb
+    s = (max if "slice" in words[1:] else min)(w / vb[2], h / vb[3])
+    m = re.fullmatch(r"x(Min|Mid|Max)Y(Min|Mid|Max)", words[0] if words else "")
+    ax, ay = (ALIGN[m.group(1)], ALIGN[m.group(2)]) if m else (0.5, 0.5)
+    return w, h, [vb[0] + (vb[2] - w / s) * ax, vb[1] + (vb[3] - h / s) * ay, w / s, h / s]
 
 
 def texts(root):
@@ -131,16 +172,26 @@ def main():
     os.makedirs(out, exist_ok=True)
     tree = ET.parse(args.svg)
     root = tree.getroot()
-    x0, y0, w, h = size_of(root)
-    scale = args.width / w
-    p = round(0.25 * max(w, h) * scale)
-    pad = p / scale
+    vw, vh, (x0, y0, w, h) = canvas(root)
+    full_h = args.width * vh / vw
+    sx, sy = args.width / w, full_h / h
+    p = round(0.25 * max(args.width, full_h))
+    tmp = tempfile.mkdtemp()
+    src = args.svg
+    if not renders_as_is(root):
+        root.set("width", str(vw))
+        root.set("height", str(vh))
+        src = os.path.join(tmp, "sized.svg")
+        write(tree, src)
 
     full_png = os.path.join(out, "full.png")
     small_png = os.path.join(out, "small.png")
-    render(args.svg, full_png, args.width)
-    render(args.svg, small_png, args.small)
+    render(src, full_png, args.width)
+    render(src, small_png, args.small)
     full = flat(full_png, 255)
+    rows, cols = full.shape[:2]
+    if cols != args.width or abs(rows - full_h) > 1:
+        sys.exit(f"the renderer drew {cols}x{rows} px, not {args.width}x{full_h:.0f}; check the width, height and viewBox of the svg element")
     clear = bool((np.asarray(Image.open(full_png).convert("RGBA"))[:, :, 3] < 250).any())
     full_dark = flat(full_png, 0) if clear else None
 
@@ -179,7 +230,6 @@ def main():
     problems = []
     if cjk_font_missing(root):
         problems.append("Japanese text found but no Japanese font is installed, so it may render as empty boxes (install Noto Sans CJK JP)")
-    tmp = tempfile.mkdtemp()
     n = len(texts(root))
     for i in range(n):
         solo = copy.deepcopy(tree)
@@ -201,9 +251,10 @@ def main():
         for j, t in enumerate(texts(sroot)):
             if j != i:
                 hide(t)
-        sroot.set("viewBox", f"{x0 - pad} {y0 - pad} {w + 2 * pad} {h + 2 * pad}")
-        sroot.set("width", str(w + 2 * pad))
-        sroot.set("height", str(h + 2 * pad))
+        sroot.set("viewBox", f"{x0 - p / sx} {y0 - p / sy} {(args.width + 2 * p) / sx} {(rows + 2 * p) / sy}")
+        sroot.set("width", str(args.width + 2 * p))
+        sroot.set("height", str(rows + 2 * p))
+        sroot.set("preserveAspectRatio", "none")
         sp = os.path.join(tmp, f"s{i}.svg")
         write(solo, sp)
         pp = os.path.join(tmp, f"s{i}.png")
@@ -214,7 +265,7 @@ def main():
         if len(xs) == 0:
             problems.append(f"text '{name}': draws nothing")
             continue
-        cw, ch = full.shape[1], full.shape[0]
+        cw, ch = cols, rows
         sides = []
         if xs.min() < p:
             sides.append("left")
@@ -227,7 +278,7 @@ def main():
         if sides:
             problems.append(f"text '{name}': runs off the {'/'.join(sides)} edge")
         lines = max(1, len(texts(root)[i].findall(f"{{{SVG_NS}}}tspan")))
-        share = (ys.max() - ys.min() + 1) / scale / lines / max(w, h)
+        share = (ys.max() - ys.min() + 1) / lines / max(args.width, full_h)
         if share * 100 < args.min_text and not sides:
             problems.append(f"text '{name}': very small, about {share * 100:.1f}% of the image side (want {args.min_text:g}%+)")
 
@@ -243,7 +294,7 @@ def main():
         base = plain if own_filter[i] and plain is not None else full
         cover = (np.abs(base - own).mean(axis=2)[mask] > 60).mean()
         ring = np.zeros_like(mask)
-        r = max(2, int(3 * scale))
+        r = max(2, int(3 * sx))
         for dy in (-r, 0, r):
             for dx in (-r, 0, r):
                 ring |= np.roll(np.roll(mask, dy, 0), dx, 1)
