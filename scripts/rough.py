@@ -165,7 +165,8 @@ class Rougher:
         return (self.jx(p[0], scale), self.jy(p[1], scale))
 
     def steps(self, a, b):
-        return max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (self.amp * 18 + 1e-6)))
+        shortest = max(self.amp * 18, math.hypot(self.box[2], self.box[3]) / 160, 1e-9)
+        return max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / shortest))
 
     def wobble(self, pts, closed):
         out = []
