@@ -61,6 +61,9 @@ def declarations(body):
             continue
         key, value = (s.strip() for s in part.split(":", 1))
         key, value = key.lower(), value.replace("!important", "").strip()
+        if key == "marker":
+            out["marker-start"] = out["marker-end"] = value
+            key = "marker-mid"
         if value:
             out[key] = value
     return out
@@ -194,11 +197,25 @@ def transform_scale(spec):
 
 
 class Sheet:
+    def __init__(self, root):
+        self.parent = {c: p for p in root.iter() for c in p}
+
     def get(self, el, prop):
         own = declarations(el.get("style", ""))
         if prop in own:
             return own[prop]
         return el.get(prop)
+
+    def inherited(self, el, prop):
+        while el is not None:
+            value = self.get(el, prop)
+            if value is not None and value.strip() != "inherit":
+                return value.strip()
+            el = self.parent.get(el)
+        return None
+
+    def has_marker(self, el, props=("marker-start", "marker-mid", "marker-end")):
+        return any(self.inherited(el, p) not in (None, "none") for p in props)
 
 
 def shape_animated(el):
@@ -215,7 +232,8 @@ class Rougher:
         self.box = box
         self.free = True
         self.font = 16.0
-        self.sheet = Sheet()
+        self.whole = False
+        self.sheet = Sheet(root)
         self.filters = {}
 
     def size(self, el, key, axis):
@@ -272,6 +290,8 @@ class Rougher:
         return (self.jx(p[0], scale), self.jy(p[1], scale))
 
     def steps(self, a, b):
+        if self.whole:
+            return 1
         shortest = max(self.amp * 18, self.diag / 160, 1e-9)
         return max(1, min(200, int(math.hypot(b[0] - a[0], b[1] - a[1]) / shortest)))
 
@@ -290,6 +310,8 @@ class Rougher:
     def to_path(self, el, d):
         if shape_animated(el):
             return
+        if tag(el) in ("rect", "circle", "ellipse") and self.sheet.has_marker(el):
+            add_style(el, "marker:none")
         for k in SHAPE_ATTRS:
             el.attrib.pop(k, None)
         el.tag = f"{{{SVG_NS}}}path"
@@ -356,7 +378,7 @@ class Rougher:
 
     def curve(self, out, seg, ja, jb, depth=0):
         p0, c1, c2, p1 = seg
-        if depth < 3 and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > self.amp * 30:
+        if depth < 3 and not self.whole and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > self.amp * 30:
             left, right = split_cubic(*seg)
             jm = self.jp(left[3])
             self.curve(out, left, ja, jm, depth + 1)
@@ -471,6 +493,7 @@ class Rougher:
             self.outer_scale = self.scale
             self.scale *= stretch
             self.font = font = self.font_of(child, size)
+            self.whole = t in ("path", "line", "polyline", "polygon") and self.sheet.has_marker(child, ("marker-mid",))
             if t == "svg" and not self.enter_viewport(child):
                 self.free, self.box, self.scale = was
                 continue
