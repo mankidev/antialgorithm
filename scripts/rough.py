@@ -141,6 +141,15 @@ def arc_cubics(p0, rx, ry, rot, large, sweep, p1):
     return out
 
 
+def flat(pts):
+    far = max(pts, key=lambda p: math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]))
+    dx, dy = far[0] - pts[0][0], far[1] - pts[0][1]
+    reach = math.hypot(dx, dy)
+    if reach == 0:
+        return True
+    return all(abs((p[0] - pts[0][0]) * dy - (p[1] - pts[0][1]) * dx) / reach <= 1e-9 * reach for p in pts)
+
+
 def parse_path(d):
     toks = TOK.findall(d)
     segs = []
@@ -247,6 +256,7 @@ def transform_scale(spec):
 class Sheet:
     def __init__(self, root):
         self.parent = {c: p for p in root.iter() for c in p}
+        self.styled = any(tag(e) == "style" and (e.text or "").strip() for e in root.iter())
 
     def get(self, el, prop):
         own = declarations(el.get("style", ""))
@@ -410,6 +420,8 @@ class Rougher:
         nums = [float(n) for n in NUM.findall(el.get("points", ""))]
         pts = list(zip(nums[0::2], nums[1::2]))
         if len(pts) >= 2 and self.fits(*nums):
+            if not closed:
+                self.keep_unfilled(el, [pts])
             self.to_path(el, self.wobble(pts, closed))
 
     def ellipse(self, el):
@@ -465,7 +477,18 @@ class Rougher:
             return
         coords = [v for s in segs for p in s[1:] for v in p]
         if self.fits(*coords):
+            if not any(seg[0] == "Z" for seg in segs):
+                runs = [[]]
+                for seg in segs:
+                    if seg[0] == "M" and runs[-1]:
+                        runs.append([])
+                    runs[-1].extend(seg[1:])
+                self.keep_unfilled(el, runs)
             el.set("d", self.rough_segments(segs))
+
+    def keep_unfilled(self, el, runs):
+        if not self.sheet.styled and self.sheet.inherited(el, "fill") is None and all(flat(run) for run in runs):
+            el.set("fill", "none")
 
     def rough_segments(self, segs):
         out = []
