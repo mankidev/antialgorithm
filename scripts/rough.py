@@ -24,6 +24,23 @@ SIMPLE = re.compile(r"(\*|[\w-]+)|#([\w-]+)|\.([\w-]+)|\[\s*([\w:-]+)\s*(?:([~|^
 COMPOUND = re.compile(r"\s*([>+~])\s*|\s+|((?:[^\s>+~\[(]|\[[^\]]*\]|\([^)]*\))+)")
 CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 IMPORTANT = re.compile(r"!\s*important\s*$", re.IGNORECASE)
+INITIAL = {
+    "opacity": "1", "display": "inline", "overflow": "visible", "clip-path": "none", "mask": "none", "filter": "none",
+    "transform": "none", "stop-color": "black", "stop-opacity": "1", "flood-color": "black", "flood-opacity": "1",
+    "lighting-color": "white", "mix-blend-mode": "normal", "isolation": "auto", "baseline-shift": "baseline",
+    "alignment-baseline": "auto", "text-decoration": "none", "unicode-bidi": "normal",
+}
+PRESENTATION = {
+    "alignment-baseline", "baseline-shift", "clip", "clip-path", "clip-rule", "color", "color-interpolation",
+    "color-interpolation-filters", "color-rendering", "cursor", "direction", "display", "dominant-baseline", "fill",
+    "fill-opacity", "fill-rule", "filter", "flood-color", "flood-opacity", "font-family", "font-size",
+    "font-size-adjust", "font-stretch", "font-style", "font-variant", "font-weight", "image-rendering",
+    "letter-spacing", "lighting-color", "marker-end", "marker-mid", "marker-start", "mask", "opacity", "overflow",
+    "paint-order", "pointer-events", "shape-rendering", "stop-color", "stop-opacity", "stroke", "stroke-dasharray",
+    "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity", "stroke-width",
+    "text-anchor", "text-decoration", "text-rendering", "unicode-bidi", "vector-effect", "visibility", "word-spacing",
+    "writing-mode",
+}
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
 
 
@@ -381,6 +398,25 @@ class Sheet:
                         rules.append((specificity(parts), len(rules), parts, decls))
         rules.sort(key=lambda r: (r[0], r[1]), reverse=True)
         self.matched = {e: [r for r in rules if self.matches(r[2], len(r[2]) - 1, e)] for e in root.iter()}
+        self.inline = {e: declarations(e.get("style", "")) for e in root.iter()}
+
+    def keep_values(self, root):
+        after = Sheet(root)
+        for el, then in self.matched.items():
+            now = after.matched.get(el, [])
+            changed = {r[1] for r in then} ^ {r[1] for r in now}
+            if not changed:
+                continue
+            set_here = {p for p, v in declarations(el.get("style", "")).items() if self.inline[el].get(p) != v}
+            for prop in sorted({p for r in then + now if r[1] in changed for p in r[3]} - set_here):
+                want = self.cascade(el, prop, then)
+                if want == after.cascade(el, prop, now):
+                    continue
+                value = INITIAL.get(prop, "inherit") if want is None else want
+                if prop in PRESENTATION and prop not in declarations(el.get("style", "")) and not any(prop in r[3] for r in now):
+                    el.set(prop, value)
+                else:
+                    add_style(el, f"{prop}:{value}{' !important' if any(r[3].get(prop, ('', False))[1] for r in now) else ''}")
 
     def cascade(self, el, prop, rules):
         own = declarations(el.get("style", ""))
@@ -849,6 +885,7 @@ def main():
     amp = args.amount * math.hypot(w, h) / REF_DIAG * 1.4
     rougher = Rougher(amp, rng, root, box)
     rougher.walk(root, rougher.rem)
+    rougher.sheet.keep_values(root)
     try:
         with open(args.dst, "w", encoding="utf-8", newline="\n") as out:
             tree.write(out, encoding="unicode", xml_declaration=False)
