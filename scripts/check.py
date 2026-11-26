@@ -48,7 +48,10 @@ def cairo_dir():
 
 def render(svg_path, png_path, width):
     if shutil.which("rsvg-convert"):
-        subprocess.run(["rsvg-convert", "-w", str(width), svg_path, "-o", png_path], check=True, stderr=subprocess.DEVNULL)
+        done = subprocess.run(["rsvg-convert", "-w", str(width), svg_path, "-o", png_path], check=False, capture_output=True)
+        if done.returncode:
+            err = " ".join(done.stderr.decode("utf-8", "replace").split())
+            sys.exit(f"rsvg-convert could not render the SVG: {err[:300] or 'exit code ' + str(done.returncode)}")
         return
     found = cairo_dir()
     if found:
@@ -57,7 +60,10 @@ def render(svg_path, png_path, width):
         import cairosvg
     except (ImportError, OSError):
         sys.exit("needs rsvg-convert, or the cairosvg python package with a cairo library it can load")
-    cairosvg.svg2png(url=svg_path, write_to=png_path, output_width=width)
+    try:
+        cairosvg.svg2png(url=svg_path, write_to=png_path, output_width=width)
+    except (ValueError, TypeError, LookupError, ArithmeticError, SyntaxError, OSError, MemoryError) as e:
+        sys.exit(f"cairosvg could not render the SVG: {' '.join(str(e).split())[:300] or type(e).__name__}")
 
 
 def flat(png, bg):
@@ -156,26 +162,55 @@ def cjk_font_missing(root):
     return not out.strip()
 
 
+def bounded(kind, low, high):
+    def parse(text):
+        try:
+            value = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a number: {text}") from None
+        if not low <= value <= high:
+            raise argparse.ArgumentTypeError(f"must be from {low:g} to {high:g}")
+        return value
+
+    return parse
+
+
+def read_svg(path):
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        sys.exit(f"cannot open {path}: {e.strerror}")
+    if data[:2] == b"\x1f\x8b":
+        sys.exit(f"{path} is gzip-compressed (svgz); unzip it to a plain .svg first")
+    try:
+        return ET.ElementTree(ET.fromstring(data))
+    except ET.ParseError as e:
+        sys.exit(f"{path} is not valid SVG XML: {e}")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("svg")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--width", type=int, default=800)
-    ap.add_argument("--small", type=int, default=64)
-    ap.add_argument("--min-text", type=float, default=1.2, help="smallest text height as a percent of the image side; about 0.6 for interfaces")
+    ap.add_argument("--width", type=bounded(int, 100, 4000), default=800)
+    ap.add_argument("--small", type=bounded(int, 8, 1024), default=64)
+    ap.add_argument("--min-text", type=bounded(float, 0, 100), default=1.2, help="smallest text height as a percent of the image side; about 0.6 for interfaces")
     args = ap.parse_args()
 
     name = os.path.splitext(os.path.basename(args.svg))[0]
     out = args.out or os.path.join(tempfile.gettempdir(), "antialgorithm_check", name)
     os.makedirs(out, exist_ok=True)
-    tree = ET.parse(args.svg)
+    tree = read_svg(args.svg)
     root = tree.getroot()
     vw, vh, (x0, y0, w, h) = canvas(root)
     full_h = args.width * vh / vw
     sx, sy = args.width / w, full_h / h
     p = round(0.25 * max(args.width, full_h))
+    if (args.width + 2 * p) * (full_h + 2 * p) > Image.MAX_IMAGE_PIXELS:
+        sys.exit(f"the image is too tall to check at --width {args.width}; use a smaller --width")
     tmp = tempfile.mkdtemp()
     src = args.svg
     if not renders_as_is(root):
@@ -323,4 +358,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RecursionError:
+        sys.exit("the SVG nests its elements too deeply to check")
