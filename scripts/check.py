@@ -367,14 +367,15 @@ def check(args, tmp):
         pp = os.path.join(tmp, f"s{i}.png")
         render(sp, pp, args.width + 2 * p)
         a = np.asarray(Image.open(pp).convert("RGBA"))[:, :, 3]
-        ys, xs = np.nonzero(a > 40)
+        peak = int(a.max())
         name = label(texts(root)[i])
-        if len(xs) == 0 and on_path[i] and shutil.which("rsvg-convert"):
+        if peak < 3 and on_path[i] and shutil.which("rsvg-convert"):
             unseen.append(name)
             continue
-        if len(xs) == 0:
+        if peak < 3:
             problems.append(f"text '{name}': draws nothing")
             continue
+        ys, xs = np.nonzero(a > 40 * peak / 255)
         cw, ch = cols, rows
         sides = []
         if xs.min() < p:
@@ -396,12 +397,21 @@ def check(args, tmp):
         inner = rgba[p:p + ch, p:p + cw]
         ih, iw = min(inner.shape[0], ch), min(inner.shape[1], cw)
         mask = np.zeros(full.shape[:2], bool)
-        mask[:ih, :iw] = inner[:ih, :iw, 3] > 200
+        mask[:ih, :iw] = inner[:ih, :iw, 3] > 200 * peak / 255
         if mask.sum() < 4:
             continue
         own = np.zeros_like(full)
         own[:ih, :iw] = inner[:ih, :iw, :3]
         base = plain if text_filtered[i] else full
+        if peak < 250:
+            behind = copy.deepcopy(nf if text_filtered[i] else tree)
+            hide(texts(behind.getroot())[i])
+            bp = os.path.join(tmp, f"b{i}.svg")
+            write(behind, bp)
+            render(bp, bp + ".png", args.width)
+            alpha = np.zeros(full.shape[:2] + (1,), np.float32)
+            alpha[:ih, :iw] = inner[:ih, :iw, 3:4] / 255
+            own = own * alpha + flat(bp + ".png", 255) * (1 - alpha)
         cover = (np.abs(base - own).mean(axis=2)[mask] > 60).mean()
         ring = np.zeros_like(mask)
         r = max(2, int(3 * sx))
