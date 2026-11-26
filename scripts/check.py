@@ -188,21 +188,23 @@ def hide(el):
     el.set("style", (st + ";" if st else "") + "display:none")
 
 
-def unfilter(el):
-    el.attrib.pop("filter", None)
+def drop(el, prop):
+    el.attrib.pop(prop, None)
     st = el.get("style", "")
-    if "filter" in st:
-        el.set("style", re.sub(r"filter\s*:[^;]*;?", "", st))
+    if prop in st:
+        el.set("style", re.sub(prop + r"\s*:[^;]*;?", "", st))
 
 
-def strip(el, hide_shapes):
+def strip(el, solo):
     for c in el:
         if tag(c) in HOLDERS:
             continue
-        if hide_shapes and tag(c) in SHAPES:
-            hide(c)
-        unfilter(c)
-        strip(c, hide_shapes)
+        if solo:
+            if tag(c) in SHAPES:
+                hide(c)
+            drop(c, "clip-path")
+        drop(c, "filter")
+        strip(c, solo)
 
 
 def write(tree, path):
