@@ -3,15 +3,23 @@ import argparse
 import math
 import random
 import re
+import sys
 import xml.etree.ElementTree as ET
 
 SVG_NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG_NS)
 ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
+MAX_DEPTH = 500
+REF_DIAG = 720
+SHAPE_ATTRS = ("x", "y", "width", "height", "x1", "y1", "x2", "y2", "points", "cx", "cy", "r", "rx", "ry")
 SKIP = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol", "linearGradient", "radialGradient", "style", "title", "desc"}
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
+LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s*$")
+UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6}
+TRANSFORM = re.compile(r"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)")
+FONT_KEYWORDS = {"xx-small": 9.0, "x-small": 10.0, "small": 13.0, "medium": 16.0, "large": 18.0, "x-large": 24.0, "xx-large": 32.0}
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
 
 
@@ -26,18 +34,55 @@ def fnum(v, default=0.0):
     return float(m.group()) if m else default
 
 
-def style_get(el, key):
-    st = el.get("style", "")
-    m = re.search(rf"(?:^|;)\s*{key}\s*:\s*([^;]+)", st)
-    return m.group(1).strip() if m else el.get(key)
+def length(v, ref=0.0, font=16.0, default=0.0, rem=16.0):
+    m = LENGTH.match(str(v)) if v is not None else None
+    if not m:
+        return default
+    x, unit = float(m.group(1)), m.group(2).lower()
+    if unit == "%":
+        return x * ref / 100
+    if unit == "rem":
+        return x * rem
+    if unit in ("em", "ex"):
+        return x * font * (0.5 if unit == "ex" else 1)
+    return x * UNIT_PX[unit] if unit in UNIT_PX else default
 
 
-def fmt(x):
-    return f"{x:.2f}".rstrip("0").rstrip(".")
+def font_px(v, parent, rem=16.0):
+    v = (v or "").strip().lower()
+    if v in FONT_KEYWORDS:
+        return FONT_KEYWORDS[v]
+    if v in ("smaller", "larger"):
+        return parent / 1.2 if v == "smaller" else parent * 1.2
+    return length(v, parent, parent, parent, rem)
 
 
-def pt(p):
-    return f"{fmt(p[0])},{fmt(p[1])}"
+def declarations(body):
+    out = {}
+    for part in body.split(";"):
+        if ":" not in part:
+            continue
+        key, value = (s.strip() for s in part.split(":", 1))
+        key, value = key.lower(), value.replace("!important", "").strip()
+        if key == "marker":
+            out["marker-start"] = out["marker-end"] = value
+            key = "marker-mid"
+        if value:
+            out[key] = value
+    return out
+
+
+def finite(*xs):
+    return all(math.isfinite(x) for x in xs)
+
+
+def add_style(el, decl):
+    st = el.get("style", "").strip().rstrip(";")
+    el.set("style", f"{st};{decl}" if st else decl)
+
+
+def fmt(x, places=2):
+    return f"{x:.{places}f}".rstrip("0").rstrip(".") if places else f"{x:.0f}"
 
 
 def lerp(a, b, t):
@@ -49,6 +94,63 @@ def split_cubic(p0, c1, c2, p1):
     d, e = lerp(a, b, 0.5), lerp(b, c, 0.5)
     m = lerp(d, e, 0.5)
     return (p0, a, d, m), (m, e, c, p1)
+
+
+def arc_cubics(p0, rx, ry, rot, large, sweep, p1):
+    straight = [(lerp(p0, p1, 1 / 3), lerp(p0, p1, 2 / 3), p1)]
+    if p0 == p1:
+        return []
+    rx, ry = abs(rx), abs(ry)
+    if not finite(*p0, *p1, rx, ry, rot) or rx == 0 or ry == 0:
+        return straight
+    cos, sin = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    hx, hy = (p0[0] - p1[0]) / 2, (p0[1] - p1[1]) / 2
+    x1, y1 = cos * hx + sin * hy, -sin * hx + cos * hy
+    grow = (x1 / rx) * (x1 / rx) + (y1 / ry) * (y1 / ry)
+    if grow > 1:
+        rx, ry = rx * math.sqrt(grow), ry * math.sqrt(grow)
+    ax, ay = rx * y1, ry * x1
+    top = rx * ry * rx * ry - ax * ax - ay * ay
+    bottom = ax * ax + ay * ay
+    co = math.sqrt(max(0.0, top / bottom)) if bottom else 0.0
+    co = -co if large == sweep else co
+    ux, uy = co * rx * y1 / ry, -co * ry * x1 / rx
+    cx = cos * ux - sin * uy + (p0[0] + p1[0]) / 2
+    cy = sin * ux + cos * uy + (p0[1] + p1[1]) / 2
+    t1 = math.atan2((y1 - uy) / ry, (x1 - ux) / rx)
+    turn = math.atan2((-y1 - uy) / ry, (-x1 - ux) / rx) - t1
+    if sweep and turn < 0:
+        turn += math.tau
+    elif not sweep and turn > 0:
+        turn -= math.tau
+    if not finite(cx, cy, turn):
+        return straight
+    n = max(1, math.ceil(abs(turn) / (math.pi / 2) - 1e-9))
+    step = turn / n
+    k = 4 / 3 * math.tan(step / 4)
+
+    def at(t):
+        return (cx + rx * math.cos(t) * cos - ry * math.sin(t) * sin, cy + rx * math.cos(t) * sin + ry * math.sin(t) * cos)
+
+    def towards(t):
+        return (-rx * math.sin(t) * cos - ry * math.cos(t) * sin, -rx * math.sin(t) * sin + ry * math.cos(t) * cos)
+
+    out = []
+    for i in range(n):
+        a, b = t1 + i * step, t1 + (i + 1) * step
+        pa, pb, da, db = at(a), at(b), towards(a), towards(b)
+        end = p1 if i == n - 1 else pb
+        out.append(((pa[0] + k * da[0], pa[1] + k * da[1]), (pb[0] - k * db[0], pb[1] - k * db[1]), end))
+    return out
+
+
+def flat(pts):
+    far = max(pts, key=lambda p: math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]))
+    dx, dy = far[0] - pts[0][0], far[1] - pts[0][1]
+    reach = math.hypot(dx, dy)
+    if reach == 0:
+        return True
+    return all(abs((p[0] - pts[0][0]) * dy - (p[1] - pts[0][1]) * dx) / reach <= 1e-9 * reach for p in pts)
 
 
 def parse_path(d):
@@ -125,47 +227,136 @@ def parse_path(d):
             new_q = q1
         else:
             p = (a[5] + ox, a[6] + oy)
-            segs.append(("A", a[0], a[1], a[2], int(a[3]), int(a[4]), p))
+            segs.extend(("C", c1, c2, end) for c1, c2, end in arc_cubics(cur, a[0], a[1], a[2], a[3] != 0, a[4] != 0, p))
         cur = p
         last_c, last_q = new_c, new_q
     return segs
 
 
+def transform_scale(spec):
+    a, b, c, d = 1.0, 0.0, 0.0, 1.0
+    for name, args in TRANSFORM.findall(spec or ""):
+        v = [float(n) for n in NUM.findall(args)] or [0.0]
+        if name == "matrix" and len(v) == 6:
+            m = v[:4]
+        elif name == "scale":
+            m = (v[0], 0.0, 0.0, v[1] if len(v) > 1 else v[0])
+        elif name == "rotate":
+            r = math.radians(v[0])
+            m = (math.cos(r), math.sin(r), -math.sin(r), math.cos(r))
+        elif name in ("skewX", "skewY"):
+            k = math.tan(math.radians(v[0]))
+            m = (1.0, 0.0, k, 1.0) if name == "skewX" else (1.0, k, 0.0, 1.0)
+        else:
+            continue
+        a, b, c, d = a * m[0] + c * m[1], b * m[0] + d * m[1], a * m[2] + c * m[3], b * m[2] + d * m[3]
+    total, det = a * a + b * b + c * c + d * d, a * d - b * c
+    if not finite(total, det) or det == 0:
+        return 0.0
+    return math.sqrt((total + math.sqrt(max(0.0, total * total - 4 * det * det))) / 2)
+
+
+class Sheet:
+    def __init__(self, root):
+        self.parent = {c: p for p in root.iter() for c in p}
+        self.styled = any(tag(e) == "style" and (e.text or "").strip() for e in root.iter())
+
+    def get(self, el, prop):
+        own = declarations(el.get("style", ""))
+        if prop in own:
+            return own[prop]
+        return el.get(prop)
+
+    def inherited(self, el, prop):
+        while el is not None:
+            value = self.get(el, prop)
+            if value is not None and value.strip() != "inherit":
+                return value.strip()
+            el = self.parent.get(el)
+        return None
+
+    def has_marker(self, el, props=("marker-start", "marker-mid", "marker-end")):
+        return any(self.inherited(el, p) not in (None, "none") for p in props)
+
+
+def shape_animated(el):
+    return any(tag(c) in ("animate", "set") and c.get("attributeName") in SHAPE_ATTRS for c in el)
+
+
 class Rougher:
     def __init__(self, amp, rng, root, box):
-        self.amp = amp
+        self.base_amp = amp
+        self.base_diag = math.hypot(box[2], box[3])
+        self.amount = amp * REF_DIAG / (1.4 * self.base_diag)
+        self.scale = self.outer_scale = 1.0
         self.rng = rng
         self.root = root
         self.box = box
         self.free = True
-        self.filter_id = None
+        self.font = 16.0
+        self.whole = False
+        self.sheet = Sheet(root)
+        self.rem = font_px(self.sheet.get(root, "font-size"), 16.0)
+        self.filters = {}
+
+    def size(self, el, key, axis):
+        _, _, w, h = self.box
+        ref = (w, h, math.hypot(w, h) / math.sqrt(2))[axis]
+        return length(el.get(key), ref, self.font, rem=self.rem)
+
+    @property
+    def amp(self):
+        return self.base_amp / self.scale
+
+    @property
+    def diag(self):
+        return self.base_diag / self.scale
+
+    def places(self, diag):
+        return min(12, max(0, math.ceil(math.log10(REF_DIAG * 100 / diag))))
+
+    def num(self, x):
+        return fmt(x, self.places(self.diag))
+
+    def pt(self, p):
+        return f"{self.num(p[0])},{self.num(p[1])}"
+
+    def fits(self, *xs):
+        limit = 1e6 * self.diag
+        return all(math.isfinite(x) and abs(x) <= limit for x in xs)
 
     def j(self, scale=1.0):
         return self.rng.gauss(0, self.amp * scale)
 
+    def edge(self):
+        return math.hypot(self.box[2], self.box[3]) / REF_DIAG
+
     def jx(self, x, scale):
         x0, _, w, _ = self.box
-        d = self.j(scale)
-        if self.free and x <= x0 + 1:
-            return x - abs(d) - 1
-        if self.free and x >= x0 + w - 1:
-            return x + abs(d) + 1
+        d, edge = self.j(scale), self.edge()
+        if self.free and x <= x0 + edge:
+            return x - abs(d) - edge
+        if self.free and x >= x0 + w - edge:
+            return x + abs(d) + edge
         return x + d
 
     def jy(self, y, scale):
         _, y0, _, h = self.box
-        d = self.j(scale)
-        if self.free and y <= y0 + 1:
-            return y - abs(d) - 1
-        if self.free and y >= y0 + h - 1:
-            return y + abs(d) + 1
+        d, edge = self.j(scale), self.edge()
+        if self.free and y <= y0 + edge:
+            return y - abs(d) - edge
+        if self.free and y >= y0 + h - edge:
+            return y + abs(d) + edge
         return y + d
 
     def jp(self, p, scale=0.6):
         return (self.jx(p[0], scale), self.jy(p[1], scale))
 
     def steps(self, a, b):
-        return max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (self.amp * 18 + 1e-6)))
+        if self.whole:
+            return 1
+        shortest = max(self.amp * 18, self.diag / 160, 1e-9)
+        return max(1, min(200, int(math.hypot(b[0] - a[0], b[1] - a[1]) / shortest)))
 
     def wobble(self, pts, closed):
         out = []
@@ -176,60 +367,90 @@ class Rougher:
                 out.append(self.jp(lerp(a, b, k / n)))
         if not closed:
             out.append(self.jp(seq[-1]))
-        d = "M" + " L".join(pt(p) for p in out)
+        d = "M" + " L".join(self.pt(p) for p in out)
         return d + ("Z" if closed else "")
 
     def to_path(self, el, d):
-        keep = {k: v for k, v in el.attrib.items() if k not in {"x", "y", "width", "height", "x1", "y1", "x2", "y2", "points", "cx", "cy", "r", "rx", "ry"}}
-        el.clear()
+        if shape_animated(el):
+            return
+        if tag(el) in ("rect", "circle", "ellipse") and self.sheet.has_marker(el):
+            add_style(el, "marker:none")
+        for k in SHAPE_ATTRS:
+            el.attrib.pop(k, None)
         el.tag = f"{{{SVG_NS}}}path"
-        for k, v in keep.items():
-            el.set(k, v)
         el.set("d", d)
 
     def shift(self, el):
-        dx, dy = self.j(0.8), self.j(0.8)
+        amp = self.base_amp / self.outer_scale
+        dx, dy = self.rng.gauss(0, amp * 0.8), self.rng.gauss(0, amp * 0.8)
         tr = el.get("transform", "")
-        el.set("transform", f"translate({fmt(dx)},{fmt(dy)}) {tr}".strip())
+        places = self.places(self.base_diag / self.outer_scale)
+        el.set("transform", f"translate({fmt(dx, places)},{fmt(dy, places)}) {tr}".strip())
 
     def line(self, el):
-        p = [(fnum(el.get("x1")), fnum(el.get("y1"))), (fnum(el.get("x2")), fnum(el.get("y2")))]
+        p = [(self.size(el, "x1", 0), self.size(el, "y1", 1)), (self.size(el, "x2", 0), self.size(el, "y2", 1))]
+        if not self.fits(*p[0], *p[1]):
+            return
         self.to_path(el, self.wobble(p, False))
+        if tag(el) == "path":
+            add_style(el, "fill:none")
         self.shift(el)
 
     def rect(self, el):
-        if fnum(el.get("rx")) or fnum(el.get("ry")):
-            return
-        x, y, w, h = (fnum(el.get(k)) for k in ("x", "y", "width", "height"))
-        if w <= 0 or h <= 0 or str(el.get("width", "")).endswith("%"):
+        x, y, w, h = (self.size(el, k, axis) for k, axis in (("x", 0), ("y", 1), ("width", 0), ("height", 1)))
+        rx, ry = self.size(el, "rx", 0), self.size(el, "ry", 1)
+        if not self.fits(x, y, w, h, rx, ry) or w <= 0 or h <= 0:
             return
         if w >= 0.9 * self.box[2] and h >= 0.9 * self.box[3]:
             return
-        self.to_path(el, self.wobble([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], True))
+        auto_x, auto_y = (LENGTH.match(el.get(k) or "") is None for k in ("rx", "ry"))
+        rx, ry = (ry if auto_x else rx), (rx if auto_y else ry)
+        rx, ry = min(max(rx, 0.0), w / 2), min(max(ry, 0.0), h / 2)
+        if rx == 0 or ry == 0:
+            self.to_path(el, self.wobble([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], True))
+            return
+        qx, qy = rx * 0.4477, ry * 0.4477
+        r, b = x + w, y + h
+        segs = [
+            ("M", (x + rx, y)), ("L", (r - rx, y)), ("C", (r - qx, y), (r, y + qy), (r, y + ry)),
+            ("L", (r, b - ry)), ("C", (r, b - qy), (r - qx, b), (r - rx, b)),
+            ("L", (x + rx, b)), ("C", (x + qx, b), (x, b - qy), (x, b - ry)),
+            ("L", (x, y + ry)), ("C", (x, y + qy), (x + qx, y), (x + rx, y)), ("Z",),
+        ]
+        segs = [s for i, s in enumerate(segs) if s[0] != "L" or s[1] != segs[i - 1][-1]]
+        self.to_path(el, self.rough_segments(segs))
 
     def poly(self, el, closed):
         nums = [float(n) for n in NUM.findall(el.get("points", ""))]
         pts = list(zip(nums[0::2], nums[1::2]))
-        if len(pts) >= 2:
+        if len(pts) >= 2 and self.fits(*nums):
+            if not closed:
+                self.keep_unfilled(el, [pts])
             self.to_path(el, self.wobble(pts, closed))
 
     def ellipse(self, el):
-        cx, cy = fnum(el.get("cx")), fnum(el.get("cy"))
+        cx, cy = self.size(el, "cx", 0), self.size(el, "cy", 1)
         if tag(el) == "circle":
-            rx = ry = fnum(el.get("r"))
+            rx = ry = self.size(el, "r", 2)
         else:
-            rx, ry = fnum(el.get("rx")), fnum(el.get("ry"))
-        if rx <= 0 or ry <= 0:
+            rx, ry = self.size(el, "rx", 0), self.size(el, "ry", 1)
+        if not self.fits(cx, cy, rx, ry) or rx <= 0 or ry <= 0:
             return
-        n = max(12, int(2 * math.pi * max(rx, ry) / (self.amp * 10 + 1e-6)))
-        n = min(n, 160)
+        reach = max(rx, ry)
+        n = max(8, min(24, int(math.tau * reach / max(self.amp * 25, self.diag / 60, 1e-9))))
         drift = self.rng.uniform(0, math.tau)
         pts = []
         for k in range(n):
             a = math.tau * k / n
-            r = 1 + 0.5 * self.j(1 / max(rx, ry)) + 0.015 * math.sin(3 * a + drift)
+            r = 1 + 0.5 * self.j(1 / reach) + 0.015 * self.amount * math.sin(3 * a + drift)
             pts.append((cx + rx * r * math.cos(a), cy + ry * r * math.sin(a)))
-        d = "M" + " L".join(pt(p) for p in pts) + "Z"
+        d = "M" + self.pt(pts[0])
+        for i in range(n):
+            before, a, b, after = pts[i - 1], pts[i], pts[(i + 1) % n], pts[(i + 2) % n]
+            c1 = (a[0] + (b[0] - before[0]) / 6, a[1] + (b[1] - before[1]) / 6)
+            c2 = (b[0] - (after[0] - a[0]) / 6, b[1] - (after[1] - a[1]) / 6)
+            d += f" C{self.pt(c1)} {self.pt(c2)} {self.pt(b)}"
+        d += "Z"
         small = max(rx, ry) < self.amp * 6
         self.to_path(el, d)
         if small:
@@ -238,11 +459,11 @@ class Rougher:
     def straight(self, out, a, b):
         n = self.steps(a, b)
         for k in range(1, n):
-            out.append("L" + pt(self.jp(lerp(a, b, k / n))))
+            out.append("L" + self.pt(self.jp(lerp(a, b, k / n))))
 
     def curve(self, out, seg, ja, jb, depth=0):
         p0, c1, c2, p1 = seg
-        if depth < 3 and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > self.amp * 30:
+        if depth < 3 and not self.whole and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > self.amp * 30:
             left, right = split_cubic(*seg)
             jm = self.jp(left[3])
             self.curve(out, left, ja, jm, depth + 1)
@@ -252,12 +473,28 @@ class Rougher:
         db = (jb[0] - p1[0], jb[1] - p1[1])
         k1 = (c1[0] + da[0] + self.j(0.35), c1[1] + da[1] + self.j(0.35))
         k2 = (c2[0] + db[0] + self.j(0.35), c2[1] + db[1] + self.j(0.35))
-        out.append(f"C{pt(k1)} {pt(k2)} {pt(jb)}")
+        out.append(f"C{self.pt(k1)} {self.pt(k2)} {self.pt(jb)}")
 
     def path(self, el):
         segs = parse_path(el.get("d", ""))
         if not segs or segs[0][0] != "M":
             return
+        coords = [v for s in segs for p in s[1:] for v in p]
+        if self.fits(*coords):
+            if not any(seg[0] == "Z" for seg in segs):
+                runs = [[]]
+                for seg in segs:
+                    if seg[0] == "M" and runs[-1]:
+                        runs.append([])
+                    runs[-1].extend(seg[1:])
+                self.keep_unfilled(el, runs)
+            el.set("d", self.rough_segments(segs))
+
+    def keep_unfilled(self, el, runs):
+        if not self.sheet.styled and self.sheet.inherited(el, "fill") is None and all(flat(run) for run in runs):
+            el.set("fill", "none")
+
+    def rough_segments(self, segs):
         out = []
         cur = start = (0.0, 0.0)
         jcur = jstart = cur
@@ -266,29 +503,25 @@ class Rougher:
             if kind == "M":
                 cur = start = s[1]
                 jcur = jstart = self.jp(cur)
-                out.append("M" + pt(jcur))
+                out.append("M" + self.pt(jcur))
             elif kind == "L":
                 self.straight(out, cur, s[1])
-                cur, jcur = s[1], self.jp(s[1])
-                out.append("L" + pt(jcur))
+                cur, jcur = s[1], jstart if s[1] == start else self.jp(s[1])
+                out.append("L" + self.pt(jcur))
             elif kind == "C":
-                jend = self.jp(s[3])
+                jend = jstart if s[3] == start else self.jp(s[3])
                 self.curve(out, (cur, s[1], s[2], s[3]), jcur, jend)
                 cur, jcur = s[3], jend
-            elif kind == "A":
-                _, rx, ry, rot, large, sweep, p = s
-                jcur = self.jp(p)
-                out.append(f"A{fmt(rx)} {fmt(ry)} {fmt(rot)} {large} {sweep} {pt(jcur)}")
-                cur = p
             else:
                 self.straight(out, cur, start)
                 out.append("Z")
                 cur, jcur = start, jstart
-        el.set("d", " ".join(out))
+        return " ".join(out)
 
     def ensure_filter(self):
-        if self.filter_id:
-            return self.filter_id
+        freq, scale = fmt(0.9 * REF_DIAG / self.diag, 4), self.num(self.amp * 2.2)
+        if (freq, scale) in self.filters:
+            return self.filters[freq, scale]
         used = {e.get("id") for e in self.root.iter() if e.get("id")}
         fid, k = "rough-edge", 2
         while fid in used:
@@ -298,52 +531,66 @@ class Rougher:
             defs = ET.Element(f"{{{SVG_NS}}}defs")
             self.root.insert(0, defs)
         f = ET.SubElement(defs, f"{{{SVG_NS}}}filter", {"id": fid, "x": "-5%", "y": "-5%", "width": "110%", "height": "110%"})
-        ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": "0.9", "numOctaves": "2", "seed": str(self.rng.randint(1, 9999)), "result": "n"})
-        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": fmt(self.amp * 2.2), "xChannelSelector": "R", "yChannelSelector": "G"})
-        self.filter_id = fid
+        ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": freq, "numOctaves": "2", "seed": str(self.rng.randint(1, 9999)), "result": "n"})
+        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": scale, "xChannelSelector": "R", "yChannelSelector": "G"})
+        self.filters[freq, scale] = fid
         return fid
 
-    def shake(self, el, chars, k):
+    def shake(self, el, chars, k, size):
         n = len(chars)
         if not n:
             return
         if not el.get("rotate"):
             el.set("rotate", " ".join(fmt(self.rng.gauss(0, 2.2 * k)) for _ in range(n)))
-        own = el.get("dy", "")
-        if len(NUM.findall(own)) > 1:
-            return
+        given = [length(v, self.box[3], size, rem=self.rem) for v in re.split(r"[\s,]+", el.get("dy", "").strip()) if v]
+        given += [0.0] * (n - len(given))
         offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
-        dys = [offs[0] + fnum(own)] + [offs[i] - offs[i - 1] for i in range(1, n)]
-        el.set("dy", " ".join(fmt(d) for d in dys))
+        moves = [offs[0]] + [offs[i] - offs[i - 1] for i in range(1, n)]
+        el.set("dy", " ".join(self.num(d + m) for d, m in zip(given, moves + [0.0] * (len(given) - n))))
+
+    def on_canvas(self, size):
+        return size * REF_DIAG / self.diag
+
+    def calm(self, size):
+        size = self.on_canvas(size)
+        return 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
+
+    def font_of(self, el, parent):
+        return font_px(self.sheet.get(el, "font-size"), parent, self.rem)
 
     def text(self, el, size):
-        k = 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
-        kids = list(el)
-        if not kids:
-            self.shake(el, el.text or "", k)
+        if not list(el):
+            self.shake(el, el.text or "", self.calm(size), size)
         else:
-            for t in el.iter():
-                if t is not el and tag(t) == "tspan" and not list(t):
-                    ts = style_get(t, "font-size")
-                    tsize = fnum(ts, size) if ts else size
-                    self.shake(t, t.text or "", 0.25 if tsize < 16 else (0.6 if tsize < 32 else 1.0))
-        if size >= 28 and not el.get("filter") and "".join(el.itertext()).strip():
+            stack = [(c, self.font_of(c, size)) for c in el]
+            while stack:
+                t, tsize = stack.pop()
+                if tag(t) == "tspan" and not list(t):
+                    self.shake(t, t.text or "", self.calm(tsize), tsize)
+                stack.extend((c, self.font_of(c, tsize)) for c in t)
+        if self.on_canvas(size) >= 28 and not el.get("filter") and "".join(el.itertext()).strip():
             el.set("filter", f"url(#{self.ensure_filter()})")
 
     def walk(self, el, size):
-        fs = style_get(el, "font-size")
-        if fs:
-            size = fnum(fs, size)
         for child in list(el):
             t = tag(child)
             if t in SKIP or child.get("data-rough") == "off":
                 continue
-            was = self.free
+            stretch = transform_scale(child.get("transform"))
+            if not stretch:
+                continue
+            was = self.free, self.box, self.scale
             if child.get("transform"):
                 self.free = False
+            self.outer_scale = self.scale
+            self.scale *= stretch
+            self.font = font = self.font_of(child, size)
+            self.whole = t in ("path", "line", "polyline", "polygon") and self.sheet.has_marker(child, ("marker-mid",))
+            if t == "svg" and not self.enter_viewport(child):
+                self.free, self.box, self.scale = was
+                continue
             if t == "text":
-                cs = style_get(child, "font-size")
-                self.text(child, fnum(cs, size) if cs else size)
+                self.text(child, font)
             else:
                 if t == "line":
                     self.line(child)
@@ -357,27 +604,91 @@ class Rougher:
                     self.ellipse(child)
                 elif t == "path":
                     self.path(child)
-                self.walk(child, size)
-            self.free = was
+                elif t == "use":
+                    self.shift(child)
+                self.walk(child, font)
+            self.free, self.box, self.scale = was
+
+    def enter_viewport(self, el):
+        w, h = (self.size(el, k, axis) if el.get(k) is not None else self.box[axis + 2] for k, axis in (("width", 0), ("height", 1)))
+        vb = [float(n) for n in NUM.findall(el.get("viewBox", ""))]
+        if len(vb) == 4 and vb[2] > 0 and vb[3] > 0:
+            sx, sy = w / vb[2], h / vb[3]
+            fit = el.get("preserveAspectRatio", "")
+            stretch = max(sx, sy) if "slice" in fit or fit.strip() == "none" else min(sx, sy)
+            self.box = vb
+        else:
+            stretch = 1.0
+            self.box = [0.0, 0.0, w, h]
+        if not finite(w, h, *self.box, stretch) or w <= 0 or h <= 0 or stretch <= 0:
+            return False
+        self.scale *= stretch
+        self.free = True
+        return True
+
+
+def depth(root):
+    deepest = 0
+    stack = [(root, 1)]
+    while stack:
+        el, d = stack.pop()
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for c in el)
+    return deepest
+
+
+def read_svg(path):
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise SystemExit(f"rough.py: cannot open {path}: {e.strerror}")
+    if data[:2] == b"\x1f\x8b":
+        raise SystemExit(f"rough.py: {path} is gzip-compressed (svgz); unzip it to a plain .svg first")
+    try:
+        return ET.ElementTree(ET.fromstring(data))
+    except ET.ParseError as e:
+        raise SystemExit(f"rough.py: {path} is not valid SVG XML: {e}")
+
+
+def amount(v):
+    try:
+        x = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {v}")
+    if not math.isfinite(x) or x < 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number of 0 or more: {v}")
+    return x
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("dst")
-    ap.add_argument("--amount", type=float, default=1.0)
+    ap.add_argument("--amount", type=amount, default=1.0)
     ap.add_argument("--seed", type=int)
     args = ap.parse_args()
     rng = random.Random(args.seed) if args.seed is not None else random.SystemRandom()
-    tree = ET.parse(args.src)
+    tree = read_svg(args.src)
     root = tree.getroot()
+    if depth(root) > MAX_DEPTH:
+        raise SystemExit(f"rough.py: {args.src} nests elements more than {MAX_DEPTH} levels deep; flatten the groups and run it again")
     vb = [float(n) for n in NUM.findall(root.get("viewBox", ""))]
     box = vb if len(vb) == 4 else [0.0, 0.0, fnum(root.get("width"), 600), fnum(root.get("height"), 600)]
     w, h = box[2], box[3]
-    amp = args.amount * math.hypot(w, h) / 720 * 1.4
-    Rougher(amp, rng, root, box).walk(root, 16.0)
-    tree.write(args.dst, encoding="unicode", xml_declaration=False)
-    print(f"wrote {args.dst} (amp {amp:.2f})")
+    if not finite(*box) or w <= 0 or h <= 0:
+        raise SystemExit(f"rough.py: the canvas size {fmt(w)} x {fmt(h)} from viewBox or width/height is not usable")
+    amp = args.amount * math.hypot(w, h) / REF_DIAG * 1.4
+    rougher = Rougher(amp, rng, root, box)
+    rougher.walk(root, rougher.rem)
+    try:
+        with open(args.dst, "w", encoding="utf-8", newline="\n") as out:
+            tree.write(out, encoding="unicode", xml_declaration=False)
+    except OSError as e:
+        raise SystemExit(f"rough.py: cannot write {args.dst}: {e.strerror}")
+    print(f"wrote {args.dst} (amp {amp:.3g})")
 
 
 if __name__ == "__main__":
