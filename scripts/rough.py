@@ -168,6 +168,12 @@ class Rougher:
         self.box = box
         self.free = True
         self.filter_id = None
+        self.font = 16.0
+
+    def size(self, el, key, axis):
+        _, _, w, h = self.box
+        ref = (w, h, math.hypot(w, h) / math.sqrt(2))[axis]
+        return length(el.get(key), ref, self.font)
 
     def fits(self, *xs):
         limit = 1e6 * math.hypot(self.box[2], self.box[3])
@@ -227,7 +233,7 @@ class Rougher:
         el.set("transform", f"translate({fmt(dx)},{fmt(dy)}) {tr}".strip())
 
     def line(self, el):
-        p = [(fnum(el.get("x1")), fnum(el.get("y1"))), (fnum(el.get("x2")), fnum(el.get("y2")))]
+        p = [(self.size(el, "x1", 0), self.size(el, "y1", 1)), (self.size(el, "x2", 0), self.size(el, "y2", 1))]
         if not self.fits(*p[0], *p[1]):
             return
         self.to_path(el, self.wobble(p, False))
@@ -238,8 +244,8 @@ class Rougher:
     def rect(self, el):
         if fnum(el.get("rx")) or fnum(el.get("ry")):
             return
-        x, y, w, h = (fnum(el.get(k)) for k in ("x", "y", "width", "height"))
-        if not self.fits(x, y, w, h) or w <= 0 or h <= 0 or str(el.get("width", "")).endswith("%"):
+        x, y, w, h = (self.size(el, k, axis) for k, axis in (("x", 0), ("y", 1), ("width", 0), ("height", 1)))
+        if not self.fits(x, y, w, h) or w <= 0 or h <= 0:
             return
         if w >= 0.9 * self.box[2] and h >= 0.9 * self.box[3]:
             return
@@ -252,11 +258,11 @@ class Rougher:
             self.to_path(el, self.wobble(pts, closed))
 
     def ellipse(self, el):
-        cx, cy = fnum(el.get("cx")), fnum(el.get("cy"))
+        cx, cy = self.size(el, "cx", 0), self.size(el, "cy", 1)
         if tag(el) == "circle":
-            rx = ry = fnum(el.get("r"))
+            rx = ry = self.size(el, "r", 2)
         else:
-            rx, ry = fnum(el.get("rx")), fnum(el.get("ry"))
+            rx, ry = self.size(el, "rx", 0), self.size(el, "ry", 1)
         if not self.fits(cx, cy, rx, ry) or rx <= 0 or ry <= 0:
             return
         n = max(12, int(2 * math.pi * max(rx, ry) / (self.amp * 10 + 1e-6)))
@@ -381,9 +387,9 @@ class Rougher:
             was = self.free
             if child.get("transform"):
                 self.free = False
+            self.font = length(style_get(child, "font-size"), size, size, size)
             if t == "text":
-                cs = style_get(child, "font-size")
-                self.text(child, length(cs, size, size, size))
+                self.text(child, self.font)
             else:
                 if t == "line":
                     self.line(child)
