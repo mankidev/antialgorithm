@@ -23,6 +23,7 @@ HOLDERS = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol"}
 LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*(px|pt|pc|in|cm|mm|q|em|ex)?\s*$", re.IGNORECASE)
 UNITS = {"px": 1, "pt": 4 / 3, "pc": 16, "in": 96, "cm": 96 / 2.54, "mm": 96 / 25.4, "q": 96 / 101.6, "em": 16, "ex": 8}
 ALIGN = {"Min": 0.0, "Mid": 0.5, "Max": 1.0}
+TRANSFORM = re.compile(r"(matrix|scale|rotate|skewX|skewY)\s*\(([^)]*)\)")
 
 
 def tag(el):
@@ -131,6 +132,52 @@ def font_size(el, parent):
         elif v and scaled(v, size):
             size = scaled(v, size)
     return size
+
+
+def transform_matrix(value):
+    m = np.eye(2)
+    for name, args in TRANSFORM.findall(value or ""):
+        v = [float(n) for n in NUM.findall(args)]
+        if not v:
+            continue
+        a = math.radians(v[0])
+        if name == "matrix" and len(v) == 6:
+            t = [[v[0], v[2]], [v[1], v[3]]]
+        elif name == "scale":
+            t = [[v[0], 0], [0, v[1] if len(v) > 1 else v[0]]]
+        elif name == "rotate":
+            t = [[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]]
+        elif name == "skewX":
+            t = [[1, math.tan(a)], [0, 1]]
+        elif name == "skewY":
+            t = [[1, 0], [math.tan(a), 1]]
+        else:
+            continue
+        m = m @ np.array(t)
+    return m
+
+
+def ancestry(el, parent):
+    chain = []
+    while el is not None:
+        chain.append(el)
+        el = parent.get(el)
+    return chain[::-1]
+
+
+def line_direction(text, parent, vertical):
+    m = np.eye(2)
+    for e in ancestry(text, parent):
+        m = m @ transform_matrix(e.get("transform"))
+    return m @ np.array([0.0, 1.0] if vertical else [1.0, 0.0])
+
+
+def vertical_text(text, parent):
+    for e in reversed(ancestry(text, parent)):
+        mode = style_value(e, "writing-mode")
+        if mode:
+            return mode.strip().startswith(("tb", "vertical"))
+    return False
 
 
 def line_count(text, parent, axis):
@@ -463,8 +510,13 @@ def check(args, tmp):
             sides.append("bottom")
         if sides:
             problems.append(f"text '{name}': runs off the {'/'.join(sides)} edge")
-        lines = line_count(texts(root)[i], parent, "y")
-        share = (ys.max() - ys.min() + 1) / lines / max(args.width, full_h)
+        t = texts(root)[i]
+        vertical = vertical_text(t, parent) and shutil.which("rsvg-convert") is not None
+        d = np.array([sx, sy]) * line_direction(t, parent, vertical)
+        across = np.array([-d[1], d[0]]) / (np.hypot(*d) or 1)
+        reach = xs * across[0] + ys * across[1]
+        lines = line_count(t, parent, "x" if vertical else "y")
+        share = (reach.max() - reach.min() + 1) / lines / max(args.width, full_h)
         if share * 100 < args.min_text and not sides:
             problems.append(f"text '{name}': very small, about {share * 100:.1f}% of the image side (want {args.min_text:g}%+)")
 
