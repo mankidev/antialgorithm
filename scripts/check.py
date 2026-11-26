@@ -192,7 +192,7 @@ def main():
     rows, cols = full.shape[:2]
     if cols != args.width or abs(rows - full_h) > 1:
         sys.exit(f"the renderer drew {cols}x{rows} px, not {args.width}x{full_h:.0f}; check the width, height and viewBox of the svg element")
-    clear = bool((np.asarray(Image.open(full_png).convert("RGBA"))[:, :, 3] < 250).any())
+    clear = bool((np.asarray(Image.open(full_png).convert("RGBA"))[:int(full_h + 1e-6), :, 3] < 250).any())
     full_dark = flat(full_png, 0) if clear else None
 
     parent = {c: p for p in root.iter() for c in p}
