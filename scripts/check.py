@@ -473,6 +473,7 @@ def check(args, tmp):
     paths = text_paths(root)
     on_path = [any(tag(e) == "textPath" for e in t.iter()) for t in texts(root)]
     unseen = []
+    skipped = 0
     for i in range(n):
         solo = copy.deepcopy(tree)
         sroot = solo.getroot()
@@ -492,12 +493,16 @@ def check(args, tmp):
         peak = int(a.max())
         name = label(texts(root)[i])
         if peak < 3 and on_path[i] and shutil.which("rsvg-convert"):
-            unseen.append(name)
+            unseen.append((name, "is on a textPath, which rsvg-convert does not draw, so it is missing from the renders and was not checked; check it by eye"))
+            skipped += 1
             continue
         if peak < 3:
             problems.append(f"text '{name}': draws nothing")
             continue
         ys, xs = np.nonzero(a > 40 * peak / 255)
+        t = texts(root)[i]
+        vertical = vertical_text(t, parent)
+        sideways = vertical and not shutil.which("rsvg-convert")
         cw, ch = cols, rows
         sides = []
         if xs.min() < p:
@@ -508,17 +513,21 @@ def check(args, tmp):
             sides.append("top")
         if ys.max() >= p + ch:
             sides.append("bottom")
+        if sideways:
+            sides = []
         if sides:
             problems.append(f"text '{name}': runs off the {'/'.join(sides)} edge")
-        t = texts(root)[i]
-        vertical = vertical_text(t, parent) and shutil.which("rsvg-convert") is not None
-        d = np.array([sx, sy]) * line_direction(t, parent, vertical)
+        upright = vertical and not sideways
+        d = np.array([sx, sy]) * line_direction(t, parent, upright)
         across = np.array([-d[1], d[0]]) / (np.hypot(*d) or 1)
         reach = xs * across[0] + ys * across[1]
-        lines = line_count(t, parent, "x" if vertical else "y")
+        lines = line_count(t, parent, "x" if upright else "y")
         share = (reach.max() - reach.min() + 1) / lines / max(args.width, full_h)
         if share * 100 < args.min_text and not sides:
             problems.append(f"text '{name}': very small, about {share * 100:.1f}% of the image side (want {args.min_text:g}%+)")
+        if sideways:
+            unseen.append((name, "uses a vertical writing-mode, which cairosvg does not support, so the renders show it sideways; only its size was checked, check the rest by eye"))
+            continue
 
         rgba = np.asarray(Image.open(pp).convert("RGBA"), dtype=np.float32)
         inner = rgba[p:p + ch, p:p + cw]
@@ -560,11 +569,11 @@ def check(args, tmp):
 
     print(f"render: {full_png}")
     print(f"small {args.small}px: {small_png}")
-    print(f"texts checked: {n - len(unseen)}")
+    print(f"texts checked: {n - skipped}")
     if clear:
         print("background has see-through parts; contrast was measured on white and on black, the better one counts")
-    for name in unseen:
-        print(f"not checked: text '{name}' is on a textPath, which rsvg-convert does not draw, so it is also missing from the renders; check it by eye")
+    for name, why in unseen:
+        print(f"note: text '{name}' {why}")
     if problems:
         print("problems:")
         for pr in problems:
