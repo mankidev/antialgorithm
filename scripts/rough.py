@@ -10,6 +10,7 @@ ET.register_namespace("", SVG_NS)
 ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
 MAX_DEPTH = 500
+REF_DIAG = 720
 SHAPE_ATTRS = ("x", "y", "width", "height", "x1", "y1", "x2", "y2", "points", "cx", "cy", "r", "rx", "ry")
 SKIP = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol", "linearGradient", "radialGradient", "style", "title", "desc"}
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
@@ -17,6 +18,7 @@ TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d
 LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s*$")
 UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6, "rem": 16.0}
 TRANSFORM = re.compile(r"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)")
+FONT_KEYWORDS = {"xx-small": 9.0, "x-small": 10.0, "small": 13.0, "medium": 16.0, "large": 18.0, "x-large": 24.0, "xx-large": 32.0}
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
 
 
@@ -43,10 +45,25 @@ def length(v, ref=0.0, font=16.0, default=0.0):
     return x * UNIT_PX[unit] if unit in UNIT_PX else default
 
 
-def style_get(el, key):
-    st = el.get("style", "")
-    m = re.search(rf"(?:^|;)\s*{key}\s*:\s*([^;]+)", st)
-    return m.group(1).strip() if m else el.get(key)
+def font_px(v, parent):
+    v = (v or "").strip().lower()
+    if v in FONT_KEYWORDS:
+        return FONT_KEYWORDS[v]
+    if v in ("smaller", "larger"):
+        return parent / 1.2 if v == "smaller" else parent * 1.2
+    return length(v, parent, parent, parent)
+
+
+def declarations(body):
+    out = {}
+    for part in body.split(";"):
+        if ":" not in part:
+            continue
+        key, value = (s.strip() for s in part.split(":", 1))
+        key, value = key.lower(), value.replace("!important", "").strip()
+        if value:
+            out[key] = value
+    return out
 
 
 def finite(*xs):
@@ -176,6 +193,14 @@ def transform_scale(spec):
     return math.sqrt((total + math.sqrt(max(0.0, total * total - 4 * det * det))) / 2)
 
 
+class Sheet:
+    def get(self, el, prop):
+        own = declarations(el.get("style", ""))
+        if prop in own:
+            return own[prop]
+        return el.get(prop)
+
+
 def shape_animated(el):
     return any(tag(c) in ("animate", "set") and c.get("attributeName") in SHAPE_ATTRS for c in el)
 
@@ -189,8 +214,9 @@ class Rougher:
         self.root = root
         self.box = box
         self.free = True
-        self.filter_id = None
         self.font = 16.0
+        self.sheet = Sheet()
+        self.filters = {}
 
     def size(self, el, key, axis):
         _, _, w, h = self.box
@@ -206,7 +232,7 @@ class Rougher:
         return self.base_diag / self.scale
 
     def places(self, diag):
-        return min(12, max(0, math.ceil(math.log10(72000 / diag))))
+        return min(12, max(0, math.ceil(math.log10(REF_DIAG * 100 / diag))))
 
     def num(self, x):
         return fmt(x, self.places(self.diag))
@@ -222,7 +248,7 @@ class Rougher:
         return self.rng.gauss(0, self.amp * scale)
 
     def edge(self):
-        return math.hypot(self.box[2], self.box[3]) / 720
+        return math.hypot(self.box[2], self.box[3]) / REF_DIAG
 
     def jx(self, x, scale):
         x0, _, w, _ = self.box
@@ -378,8 +404,9 @@ class Rougher:
         el.set("d", " ".join(out))
 
     def ensure_filter(self):
-        if self.filter_id:
-            return self.filter_id
+        freq, scale = fmt(0.9 * REF_DIAG / self.diag, 4), self.num(self.amp * 2.2)
+        if (freq, scale) in self.filters:
+            return self.filters[freq, scale]
         used = {e.get("id") for e in self.root.iter() if e.get("id")}
         fid, k = "rough-edge", 2
         while fid in used:
@@ -389,9 +416,9 @@ class Rougher:
             defs = ET.Element(f"{{{SVG_NS}}}defs")
             self.root.insert(0, defs)
         f = ET.SubElement(defs, f"{{{SVG_NS}}}filter", {"id": fid, "x": "-5%", "y": "-5%", "width": "110%", "height": "110%"})
-        ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": "0.9", "numOctaves": "2", "seed": str(self.rng.randint(1, 9999)), "result": "n"})
-        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": self.num(self.amp * 2.2), "xChannelSelector": "R", "yChannelSelector": "G"})
-        self.filter_id = fid
+        ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": freq, "numOctaves": "2", "seed": str(self.rng.randint(1, 9999)), "result": "n"})
+        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": scale, "xChannelSelector": "R", "yChannelSelector": "G"})
+        self.filters[freq, scale] = fid
         return fid
 
     def shake(self, el, chars, k, size):
@@ -407,23 +434,30 @@ class Rougher:
         dys = [offs[0] + length(own, self.box[3], size)] + [offs[i] - offs[i - 1] for i in range(1, n)]
         el.set("dy", " ".join(self.num(d) for d in dys))
 
+    def on_canvas(self, size):
+        return size * REF_DIAG / self.diag
+
+    def calm(self, size):
+        size = self.on_canvas(size)
+        return 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
+
+    def font_of(self, el, parent):
+        return font_px(self.sheet.get(el, "font-size"), parent)
+
     def text(self, el, size):
-        k = 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
-        kids = list(el)
-        if not kids:
-            self.shake(el, el.text or "", k, size)
+        if not list(el):
+            self.shake(el, el.text or "", self.calm(size), size)
         else:
-            for t in el.iter():
-                if t is not el and tag(t) == "tspan" and not list(t):
-                    ts = style_get(t, "font-size")
-                    tsize = length(ts, size, size, size)
-                    self.shake(t, t.text or "", 0.25 if tsize < 16 else (0.6 if tsize < 32 else 1.0), tsize)
-        if size >= 28 and not el.get("filter") and "".join(el.itertext()).strip():
+            stack = [(c, self.font_of(c, size)) for c in el]
+            while stack:
+                t, tsize = stack.pop()
+                if tag(t) == "tspan" and not list(t):
+                    self.shake(t, t.text or "", self.calm(tsize), tsize)
+                stack.extend((c, self.font_of(c, tsize)) for c in t)
+        if self.on_canvas(size) >= 28 and not el.get("filter") and "".join(el.itertext()).strip():
             el.set("filter", f"url(#{self.ensure_filter()})")
 
     def walk(self, el, size):
-        fs = style_get(el, "font-size")
-        size = length(fs, size, size, size)
         for child in list(el):
             t = tag(child)
             if t in SKIP or child.get("data-rough") == "off":
@@ -436,12 +470,12 @@ class Rougher:
                 self.free = False
             self.outer_scale = self.scale
             self.scale *= stretch
-            self.font = length(style_get(child, "font-size"), size, size, size)
+            self.font = font = self.font_of(child, size)
             if t == "svg" and not self.enter_viewport(child):
                 self.free, self.box, self.scale = was
                 continue
             if t == "text":
-                self.text(child, self.font)
+                self.text(child, font)
             else:
                 if t == "line":
                     self.line(child)
@@ -455,7 +489,7 @@ class Rougher:
                     self.ellipse(child)
                 elif t == "path":
                     self.path(child)
-                self.walk(child, size)
+                self.walk(child, font)
             self.free, self.box, self.scale = was
 
     def enter_viewport(self, el):
@@ -513,8 +547,9 @@ def main():
     w, h = box[2], box[3]
     if not finite(*box) or w <= 0 or h <= 0:
         raise SystemExit(f"rough.py: the canvas size {fmt(w)} x {fmt(h)} from viewBox or width/height is not usable")
-    amp = args.amount * math.hypot(w, h) / 720 * 1.4
-    Rougher(amp, rng, root, box).walk(root, 16.0)
+    amp = args.amount * math.hypot(w, h) / REF_DIAG * 1.4
+    rougher = Rougher(amp, rng, root, box)
+    rougher.walk(root, rougher.font_of(root, 16.0))
     tree.write(args.dst, encoding="unicode", xml_declaration=False)
     print(f"wrote {args.dst} (amp {amp:.3g})")
 
