@@ -14,6 +14,8 @@ SHAPE_ATTRS = ("x", "y", "width", "height", "x1", "y1", "x2", "y2", "points", "c
 SKIP = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol", "linearGradient", "radialGradient", "style", "title", "desc"}
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
+LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s*$")
+UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6, "rem": 16.0}
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
 
 
@@ -26,6 +28,18 @@ def fnum(v, default=0.0):
         return default
     m = NUM.search(str(v))
     return float(m.group()) if m else default
+
+
+def length(v, ref=0.0, font=16.0, default=0.0):
+    m = LENGTH.match(str(v)) if v is not None else None
+    if not m:
+        return default
+    x, unit = float(m.group(1)), m.group(2).lower()
+    if unit == "%":
+        return x * ref / 100
+    if unit in ("em", "ex"):
+        return x * font * (0.5 if unit == "ex" else 1)
+    return x * UNIT_PX[unit] if unit in UNIT_PX else default
 
 
 def style_get(el, key):
@@ -330,7 +344,7 @@ class Rougher:
         self.filter_id = fid
         return fid
 
-    def shake(self, el, chars, k):
+    def shake(self, el, chars, k, size):
         n = len(chars)
         if not n:
             return
@@ -340,27 +354,26 @@ class Rougher:
         if len(NUM.findall(own)) > 1:
             return
         offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
-        dys = [offs[0] + fnum(own)] + [offs[i] - offs[i - 1] for i in range(1, n)]
+        dys = [offs[0] + length(own, self.box[3], size)] + [offs[i] - offs[i - 1] for i in range(1, n)]
         el.set("dy", " ".join(fmt(d) for d in dys))
 
     def text(self, el, size):
         k = 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
         kids = list(el)
         if not kids:
-            self.shake(el, el.text or "", k)
+            self.shake(el, el.text or "", k, size)
         else:
             for t in el.iter():
                 if t is not el and tag(t) == "tspan" and not list(t):
                     ts = style_get(t, "font-size")
-                    tsize = fnum(ts, size) if ts else size
-                    self.shake(t, t.text or "", 0.25 if tsize < 16 else (0.6 if tsize < 32 else 1.0))
+                    tsize = length(ts, size, size, size)
+                    self.shake(t, t.text or "", 0.25 if tsize < 16 else (0.6 if tsize < 32 else 1.0), tsize)
         if size >= 28 and not el.get("filter") and "".join(el.itertext()).strip():
             el.set("filter", f"url(#{self.ensure_filter()})")
 
     def walk(self, el, size):
         fs = style_get(el, "font-size")
-        if fs:
-            size = fnum(fs, size)
+        size = length(fs, size, size, size)
         for child in list(el):
             t = tag(child)
             if t in SKIP or child.get("data-rough") == "off":
@@ -370,7 +383,7 @@ class Rougher:
                 self.free = False
             if t == "text":
                 cs = style_get(child, "font-size")
-                self.text(child, fnum(cs, size) if cs else size)
+                self.text(child, length(cs, size, size, size))
             else:
                 if t == "line":
                     self.line(child)
