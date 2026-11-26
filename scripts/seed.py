@@ -243,6 +243,8 @@ def roll(kind, keep=None, only=None):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("kind", nargs="?", default="visual", choices=["visual", "text", "idea"])
     ap.add_argument("--only", help="roll one axis again, for example --only method")
