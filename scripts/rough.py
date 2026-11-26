@@ -38,6 +38,11 @@ def finite(*xs):
     return all(math.isfinite(x) for x in xs)
 
 
+def add_style(el, decl):
+    st = el.get("style", "").strip().rstrip(";")
+    el.set("style", f"{st};{decl}" if st else decl)
+
+
 def fmt(x):
     return f"{x:.2f}".rstrip("0").rstrip(".")
 
@@ -212,6 +217,8 @@ class Rougher:
         if not self.fits(*p[0], *p[1]):
             return
         self.to_path(el, self.wobble(p, False))
+        if tag(el) == "path":
+            add_style(el, "fill:none")
         self.shift(el)
 
     def rect(self, el):
