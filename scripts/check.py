@@ -149,17 +149,27 @@ def write(tree, path):
     tree.write(path, encoding="unicode")
 
 
-CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff00-\uffef]")
+KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff65-\uff9f]")
+HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af\uffa0-\uffdc]")
+HAN = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uff64]")
+CJK_FONT = {"Japanese": "Noto Sans CJK JP", "Korean": "Noto Sans CJK KR", "Chinese": "Noto Sans CJK SC"}
 
 
-def cjk_font_missing(root):
-    """True when the SVG has Japanese text but fontconfig lists no Japanese font."""
-    if not any(CJK.search("".join(el.itertext())) for el in root.iter() if tag(el) == "text"):
-        return False
-    if not shutil.which("fc-list"):
-        return False
-    out = subprocess.run(["fc-list", ":lang=ja", "family"], capture_output=True, text=True).stdout
-    return not out.strip()
+def cjk_fonts_missing(root):
+    text = "".join("".join(el.itertext()) for el in root.iter() if tag(el) == "text")
+    found = {name: rx.search(text) for name, rx in (("kana", KANA), ("hangul", HANGUL), ("han", HAN))}
+    if not any(found.values()) or not shutil.which("fc-list"):
+        return []
+    lang = "Japanese" if found["kana"] else "Korean" if found["hangul"] else "Chinese"
+    langs = {"kana": "Japanese", "hangul": "Korean", "han": lang}
+    missing = []
+    for kind, m in found.items():
+        if not m or langs[kind] in missing:
+            continue
+        fonts = subprocess.run(["fc-list", f":charset={ord(m.group()):x}", "family"], check=False, capture_output=True, text=True).stdout
+        if not fonts.strip():
+            missing.append(langs[kind])
+    return missing
 
 
 def bounded(kind, low, high):
@@ -272,8 +282,8 @@ def check(args, tmp):
         plain = flat(nf_png, 255)
 
     problems = []
-    if cjk_font_missing(root):
-        problems.append("Japanese text found but no Japanese font is installed, so it may render as empty boxes (install Noto Sans CJK JP)")
+    for lang in cjk_fonts_missing(root):
+        problems.append(f"{lang} text found but no installed font has its characters, so it may render as empty boxes (install {CJK_FONT[lang]})")
     n = len(texts(root))
     for i in range(n):
         solo = copy.deepcopy(tree)
