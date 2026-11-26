@@ -110,6 +110,64 @@ def for_cairo(root):
         up.insert(list(up).index(t), under)
 
 
+def scaled(value, size):
+    m = LENGTH.match(value)
+    if not m:
+        return None
+    n, unit = float(m.group(1)), (m.group(2) or "px").lower()
+    return n * size if unit == "em" else n * size / 2 if unit == "ex" else n * UNITS[unit]
+
+
+def font_size(el, parent):
+    chain = []
+    while el is not None:
+        chain.append(el)
+        el = parent.get(el)
+    size = 16.0
+    for e in reversed(chain):
+        v = (style_value(e, "font-size") or "").strip()
+        if v.endswith("%") and NUM.fullmatch(v[:-1]):
+            size *= float(v[:-1]) / 100
+        elif v and scaled(v, size):
+            size = scaled(v, size)
+    return size
+
+
+def line_count(text, parent, axis):
+    marks, pos = [], [0.0]
+
+    def walk(el):
+        size = font_size(el, parent)
+        at = [v for v in (scaled(t, size) for t in (el.get(axis) or "").replace(",", " ").split()) if v is not None]
+        by = [v for v in (scaled(t, size) for t in (el.get("d" + axis) or "").replace(",", " ").split()) if v is not None]
+        k = 0
+
+        def place(n):
+            if n < len(at):
+                pos[0] = at[n]
+            if n < len(by):
+                pos[0] += by[n]
+
+        def chars(s):
+            nonlocal k
+            for ch in re.sub(r"\s+", " ", s or ""):
+                if k:
+                    place(k)
+                k += 1
+                if not ch.isspace():
+                    marks.append(pos[0])
+
+        place(0)
+        chars(el.text)
+        for c in el:
+            walk(c)
+            chars(c.tail)
+
+    walk(text)
+    gap = 0.5 * font_size(text, parent)
+    return 1 + int((np.diff(sorted(marks)) > gap).sum())
+
+
 def luminance(rgb):
     c = rgb / 255
     c = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
@@ -405,7 +463,7 @@ def check(args, tmp):
             sides.append("bottom")
         if sides:
             problems.append(f"text '{name}': runs off the {'/'.join(sides)} edge")
-        lines = max(1, len(texts(root)[i].findall(f"{{{SVG_NS}}}tspan")))
+        lines = line_count(texts(root)[i], parent, "y")
         share = (ys.max() - ys.min() + 1) / lines / max(args.width, full_h)
         if share * 100 < args.min_text and not sides:
             problems.append(f"text '{name}': very small, about {share * 100:.1f}% of the image side (want {args.min_text:g}%+)")
