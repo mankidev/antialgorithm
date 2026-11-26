@@ -238,6 +238,20 @@ def roll_once(kind, keep, only=None):
     return out
 
 
+def known_values(axis):
+    values = {**VISUAL, **TEXT, **IDEA, "setting": SETTING, "region": REGION, "anchor": ANCHOR + NO_ANCHOR}
+    values["method"] = [m for items in METHOD_FAMILIES.values() for m in items]
+    values["color"] = VISUAL["color"] + ["the method's own colors"]
+    return values.get(axis, [])
+
+
+def canonical(axis, value):
+    for known in known_values(axis):
+        if known.casefold() == value.casefold():
+            return known
+    return value
+
+
 def axes_of(kind):
     return list(roll_once(kind, {}))
 
@@ -266,7 +280,9 @@ def main():
         k, sep, v = item.partition("=")
         if not sep:
             sys.exit(f"--keep needs axis=value, got '{item}'")
-        keep[k.strip()] = v.strip()
+        if not v.strip():
+            sys.exit(f"--keep needs a value after '=', got '{item}'")
+        keep[k.strip()] = canonical(k.strip(), v.strip())
     axes = axes_of(args.kind)
     for name in [*keep, *([args.only] if args.only else [])]:
         if name not in axes:
