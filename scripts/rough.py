@@ -382,14 +382,28 @@ class Rougher:
         self.shift(el)
 
     def rect(self, el):
-        if fnum(el.get("rx")) or fnum(el.get("ry")):
-            return
         x, y, w, h = (self.size(el, k, axis) for k, axis in (("x", 0), ("y", 1), ("width", 0), ("height", 1)))
-        if not self.fits(x, y, w, h) or w <= 0 or h <= 0:
+        rx, ry = self.size(el, "rx", 0), self.size(el, "ry", 1)
+        if not self.fits(x, y, w, h, rx, ry) or w <= 0 or h <= 0:
             return
         if w >= 0.9 * self.box[2] and h >= 0.9 * self.box[3]:
             return
-        self.to_path(el, self.wobble([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], True))
+        auto_x, auto_y = (LENGTH.match(el.get(k) or "") is None for k in ("rx", "ry"))
+        rx, ry = (ry if auto_x else rx), (rx if auto_y else ry)
+        rx, ry = min(max(rx, 0.0), w / 2), min(max(ry, 0.0), h / 2)
+        if rx == 0 or ry == 0:
+            self.to_path(el, self.wobble([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], True))
+            return
+        qx, qy = rx * 0.4477, ry * 0.4477
+        r, b = x + w, y + h
+        segs = [
+            ("M", (x + rx, y)), ("L", (r - rx, y)), ("C", (r - qx, y), (r, y + qy), (r, y + ry)),
+            ("L", (r, b - ry)), ("C", (r, b - qy), (r - qx, b), (r - rx, b)),
+            ("L", (x + rx, b)), ("C", (x + qx, b), (x, b - qy), (x, b - ry)),
+            ("L", (x, y + ry)), ("C", (x, y + qy), (x + qx, y), (x + rx, y)), ("Z",),
+        ]
+        segs = [s for i, s in enumerate(segs) if s[0] != "L" or s[1] != segs[i - 1][-1]]
+        self.to_path(el, self.rough_segments(segs))
 
     def poly(self, el, closed):
         nums = [float(n) for n in NUM.findall(el.get("points", ""))]
@@ -443,8 +457,10 @@ class Rougher:
         if not segs or segs[0][0] != "M":
             return
         coords = [v for s in segs for p in s[1:] for v in p]
-        if not self.fits(*coords):
-            return
+        if self.fits(*coords):
+            el.set("d", self.rough_segments(segs))
+
+    def rough_segments(self, segs):
         out = []
         cur = start = (0.0, 0.0)
         jcur = jstart = cur
@@ -456,17 +472,17 @@ class Rougher:
                 out.append("M" + self.pt(jcur))
             elif kind == "L":
                 self.straight(out, cur, s[1])
-                cur, jcur = s[1], self.jp(s[1])
+                cur, jcur = s[1], jstart if s[1] == start else self.jp(s[1])
                 out.append("L" + self.pt(jcur))
             elif kind == "C":
-                jend = self.jp(s[3])
+                jend = jstart if s[3] == start else self.jp(s[3])
                 self.curve(out, (cur, s[1], s[2], s[3]), jcur, jend)
                 cur, jcur = s[3], jend
             else:
                 self.straight(out, cur, start)
                 out.append("Z")
                 cur, jcur = start, jstart
-        el.set("d", " ".join(out))
+        return " ".join(out)
 
     def ensure_filter(self):
         freq, scale = fmt(0.9 * REF_DIAG / self.diag, 4), self.num(self.amp * 2.2)
