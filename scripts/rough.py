@@ -578,6 +578,8 @@ class Rougher:
                     self.ellipse(child)
                 elif t == "path":
                     self.path(child)
+                elif t == "use":
+                    self.shift(child)
                 self.walk(child, font)
             self.free, self.box, self.scale = was
 
