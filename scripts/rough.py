@@ -16,6 +16,7 @@ NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 LENGTH = re.compile(r"\s*([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s*$")
 UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "q": 96 / 101.6, "rem": 16.0}
+TRANSFORM = re.compile(r"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)")
 ARGS = {"m": 2, "l": 2, "h": 1, "v": 1, "c": 6, "s": 4, "q": 4, "t": 2, "a": 7, "z": 0}
 
 
@@ -156,13 +157,38 @@ def parse_path(d):
     return segs
 
 
+def transform_scale(spec):
+    a, b, c, d = 1.0, 0.0, 0.0, 1.0
+    for name, args in TRANSFORM.findall(spec or ""):
+        v = [float(n) for n in NUM.findall(args)] or [0.0]
+        if name == "matrix" and len(v) == 6:
+            m = v[:4]
+        elif name == "scale":
+            m = (v[0], 0.0, 0.0, v[1] if len(v) > 1 else v[0])
+        elif name == "rotate":
+            r = math.radians(v[0])
+            m = (math.cos(r), math.sin(r), -math.sin(r), math.cos(r))
+        elif name in ("skewX", "skewY"):
+            k = math.tan(math.radians(v[0]))
+            m = (1.0, 0.0, k, 1.0) if name == "skewX" else (1.0, k, 0.0, 1.0)
+        else:
+            continue
+        a, b, c, d = a * m[0] + c * m[1], b * m[0] + d * m[1], a * m[2] + c * m[3], b * m[2] + d * m[3]
+    total, det = a * a + b * b + c * c + d * d, a * d - b * c
+    if not finite(total, det) or det == 0:
+        return 0.0
+    return math.sqrt((total + math.sqrt(max(0.0, total * total - 4 * det * det))) / 2)
+
+
 def shape_animated(el):
     return any(tag(c) in ("animate", "set") and c.get("attributeName") in SHAPE_ATTRS for c in el)
 
 
 class Rougher:
     def __init__(self, amp, rng, root, box):
-        self.amp = amp
+        self.base_amp = amp
+        self.base_diag = math.hypot(box[2], box[3])
+        self.scale = self.outer_scale = 1.0
         self.rng = rng
         self.root = root
         self.box = box
@@ -175,8 +201,16 @@ class Rougher:
         ref = (w, h, math.hypot(w, h) / math.sqrt(2))[axis]
         return length(el.get(key), ref, self.font)
 
+    @property
+    def amp(self):
+        return self.base_amp / self.scale
+
+    @property
+    def diag(self):
+        return self.base_diag / self.scale
+
     def fits(self, *xs):
-        limit = 1e6 * math.hypot(self.box[2], self.box[3])
+        limit = 1e6 * self.diag
         return all(math.isfinite(x) and abs(x) <= limit for x in xs)
 
     def j(self, scale=1.0):
@@ -204,7 +238,7 @@ class Rougher:
         return (self.jx(p[0], scale), self.jy(p[1], scale))
 
     def steps(self, a, b):
-        shortest = max(self.amp * 18, math.hypot(self.box[2], self.box[3]) / 160, 1e-9)
+        shortest = max(self.amp * 18, self.diag / 160, 1e-9)
         return max(1, min(200, int(math.hypot(b[0] - a[0], b[1] - a[1]) / shortest)))
 
     def wobble(self, pts, closed):
@@ -228,7 +262,8 @@ class Rougher:
         el.set("d", d)
 
     def shift(self, el):
-        dx, dy = self.j(0.8), self.j(0.8)
+        amp = self.base_amp / self.outer_scale
+        dx, dy = self.rng.gauss(0, amp * 0.8), self.rng.gauss(0, amp * 0.8)
         tr = el.get("transform", "")
         el.set("transform", f"translate({fmt(dx)},{fmt(dy)}) {tr}".strip())
 
@@ -384,10 +419,18 @@ class Rougher:
             t = tag(child)
             if t in SKIP or child.get("data-rough") == "off":
                 continue
-            was = self.free
+            stretch = transform_scale(child.get("transform"))
+            if not stretch:
+                continue
+            was = self.free, self.box, self.scale
             if child.get("transform"):
                 self.free = False
+            self.outer_scale = self.scale
+            self.scale *= stretch
             self.font = length(style_get(child, "font-size"), size, size, size)
+            if t == "svg" and not self.enter_viewport(child):
+                self.free, self.box, self.scale = was
+                continue
             if t == "text":
                 self.text(child, self.font)
             else:
@@ -404,7 +447,24 @@ class Rougher:
                 elif t == "path":
                     self.path(child)
                 self.walk(child, size)
-            self.free = was
+            self.free, self.box, self.scale = was
+
+    def enter_viewport(self, el):
+        w, h = (self.size(el, k, axis) if el.get(k) is not None else self.box[axis + 2] for k, axis in (("width", 0), ("height", 1)))
+        vb = [float(n) for n in NUM.findall(el.get("viewBox", ""))]
+        if len(vb) == 4 and vb[2] > 0 and vb[3] > 0:
+            sx, sy = w / vb[2], h / vb[3]
+            fit = el.get("preserveAspectRatio", "")
+            stretch = max(sx, sy) if "slice" in fit or fit.strip() == "none" else min(sx, sy)
+            self.box = vb
+        else:
+            stretch = 1.0
+            self.box = [0.0, 0.0, w, h]
+        if not finite(w, h, *self.box, stretch) or w <= 0 or h <= 0 or stretch <= 0:
+            return False
+        self.scale *= stretch
+        self.free = True
+        return True
 
 
 def depth(root):
