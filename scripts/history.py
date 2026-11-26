@@ -35,8 +35,8 @@ def migrate():
 def load(kind=None):
     migrate()
     try:
-        with open(PATH, encoding="utf-8") as f:
-            lines = f.read().splitlines()
+        with open(PATH, encoding="utf-8-sig", newline="") as f:
+            lines = f.read().split("\n")
     except FileNotFoundError:
         return []
     out = []
