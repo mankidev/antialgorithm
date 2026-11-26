@@ -58,12 +58,8 @@ def add_style(el, decl):
     el.set("style", f"{st};{decl}" if st else decl)
 
 
-def fmt(x):
-    return f"{x:.2f}".rstrip("0").rstrip(".")
-
-
-def pt(p):
-    return f"{fmt(p[0])},{fmt(p[1])}"
+def fmt(x, places=2):
+    return f"{x:.{places}f}".rstrip("0").rstrip(".") if places else f"{x:.0f}"
 
 
 def lerp(a, b, t):
@@ -209,6 +205,15 @@ class Rougher:
     def diag(self):
         return self.base_diag / self.scale
 
+    def places(self, diag):
+        return min(12, max(0, math.ceil(math.log10(72000 / diag))))
+
+    def num(self, x):
+        return fmt(x, self.places(self.diag))
+
+    def pt(self, p):
+        return f"{self.num(p[0])},{self.num(p[1])}"
+
     def fits(self, *xs):
         limit = 1e6 * self.diag
         return all(math.isfinite(x) and abs(x) <= limit for x in xs)
@@ -216,22 +221,25 @@ class Rougher:
     def j(self, scale=1.0):
         return self.rng.gauss(0, self.amp * scale)
 
+    def edge(self):
+        return math.hypot(self.box[2], self.box[3]) / 720
+
     def jx(self, x, scale):
         x0, _, w, _ = self.box
-        d = self.j(scale)
-        if self.free and x <= x0 + 1:
-            return x - abs(d) - 1
-        if self.free and x >= x0 + w - 1:
-            return x + abs(d) + 1
+        d, edge = self.j(scale), self.edge()
+        if self.free and x <= x0 + edge:
+            return x - abs(d) - edge
+        if self.free and x >= x0 + w - edge:
+            return x + abs(d) + edge
         return x + d
 
     def jy(self, y, scale):
         _, y0, _, h = self.box
-        d = self.j(scale)
-        if self.free and y <= y0 + 1:
-            return y - abs(d) - 1
-        if self.free and y >= y0 + h - 1:
-            return y + abs(d) + 1
+        d, edge = self.j(scale), self.edge()
+        if self.free and y <= y0 + edge:
+            return y - abs(d) - edge
+        if self.free and y >= y0 + h - edge:
+            return y + abs(d) + edge
         return y + d
 
     def jp(self, p, scale=0.6):
@@ -250,7 +258,7 @@ class Rougher:
                 out.append(self.jp(lerp(a, b, k / n)))
         if not closed:
             out.append(self.jp(seq[-1]))
-        d = "M" + " L".join(pt(p) for p in out)
+        d = "M" + " L".join(self.pt(p) for p in out)
         return d + ("Z" if closed else "")
 
     def to_path(self, el, d):
@@ -265,7 +273,8 @@ class Rougher:
         amp = self.base_amp / self.outer_scale
         dx, dy = self.rng.gauss(0, amp * 0.8), self.rng.gauss(0, amp * 0.8)
         tr = el.get("transform", "")
-        el.set("transform", f"translate({fmt(dx)},{fmt(dy)}) {tr}".strip())
+        places = self.places(self.base_diag / self.outer_scale)
+        el.set("transform", f"translate({fmt(dx, places)},{fmt(dy, places)}) {tr}".strip())
 
     def line(self, el):
         p = [(self.size(el, "x1", 0), self.size(el, "y1", 1)), (self.size(el, "x2", 0), self.size(el, "y2", 1))]
@@ -308,7 +317,7 @@ class Rougher:
             a = math.tau * k / n
             r = 1 + 0.5 * self.j(1 / max(rx, ry)) + 0.015 * math.sin(3 * a + drift)
             pts.append((cx + rx * r * math.cos(a), cy + ry * r * math.sin(a)))
-        d = "M" + " L".join(pt(p) for p in pts) + "Z"
+        d = "M" + " L".join(self.pt(p) for p in pts) + "Z"
         small = max(rx, ry) < self.amp * 6
         self.to_path(el, d)
         if small:
@@ -317,7 +326,7 @@ class Rougher:
     def straight(self, out, a, b):
         n = self.steps(a, b)
         for k in range(1, n):
-            out.append("L" + pt(self.jp(lerp(a, b, k / n))))
+            out.append("L" + self.pt(self.jp(lerp(a, b, k / n))))
 
     def curve(self, out, seg, ja, jb, depth=0):
         p0, c1, c2, p1 = seg
@@ -331,7 +340,7 @@ class Rougher:
         db = (jb[0] - p1[0], jb[1] - p1[1])
         k1 = (c1[0] + da[0] + self.j(0.35), c1[1] + da[1] + self.j(0.35))
         k2 = (c2[0] + db[0] + self.j(0.35), c2[1] + db[1] + self.j(0.35))
-        out.append(f"C{pt(k1)} {pt(k2)} {pt(jb)}")
+        out.append(f"C{self.pt(k1)} {self.pt(k2)} {self.pt(jb)}")
 
     def path(self, el):
         segs = parse_path(el.get("d", ""))
@@ -348,11 +357,11 @@ class Rougher:
             if kind == "M":
                 cur = start = s[1]
                 jcur = jstart = self.jp(cur)
-                out.append("M" + pt(jcur))
+                out.append("M" + self.pt(jcur))
             elif kind == "L":
                 self.straight(out, cur, s[1])
                 cur, jcur = s[1], self.jp(s[1])
-                out.append("L" + pt(jcur))
+                out.append("L" + self.pt(jcur))
             elif kind == "C":
                 jend = self.jp(s[3])
                 self.curve(out, (cur, s[1], s[2], s[3]), jcur, jend)
@@ -360,7 +369,7 @@ class Rougher:
             elif kind == "A":
                 _, rx, ry, rot, large, sweep, p = s
                 jcur = self.jp(p)
-                out.append(f"A{fmt(rx)} {fmt(ry)} {fmt(rot)} {large} {sweep} {pt(jcur)}")
+                out.append(f"A{self.num(rx)} {self.num(ry)} {fmt(rot)} {large} {sweep} {self.pt(jcur)}")
                 cur = p
             else:
                 self.straight(out, cur, start)
@@ -381,7 +390,7 @@ class Rougher:
             self.root.insert(0, defs)
         f = ET.SubElement(defs, f"{{{SVG_NS}}}filter", {"id": fid, "x": "-5%", "y": "-5%", "width": "110%", "height": "110%"})
         ET.SubElement(f, f"{{{SVG_NS}}}feTurbulence", {"type": "fractalNoise", "baseFrequency": "0.9", "numOctaves": "2", "seed": str(self.rng.randint(1, 9999)), "result": "n"})
-        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": fmt(self.amp * 2.2), "xChannelSelector": "R", "yChannelSelector": "G"})
+        ET.SubElement(f, f"{{{SVG_NS}}}feDisplacementMap", {"in": "SourceGraphic", "in2": "n", "scale": self.num(self.amp * 2.2), "xChannelSelector": "R", "yChannelSelector": "G"})
         self.filter_id = fid
         return fid
 
@@ -396,7 +405,7 @@ class Rougher:
             return
         offs = [self.rng.gauss(0, self.amp * 0.5 * k) for _ in range(n)]
         dys = [offs[0] + length(own, self.box[3], size)] + [offs[i] - offs[i - 1] for i in range(1, n)]
-        el.set("dy", " ".join(fmt(d) for d in dys))
+        el.set("dy", " ".join(self.num(d) for d in dys))
 
     def text(self, el, size):
         k = 0.25 if size < 16 else (0.6 if size < 32 else 1.0)
@@ -507,7 +516,7 @@ def main():
     amp = args.amount * math.hypot(w, h) / 720 * 1.4
     Rougher(amp, rng, root, box).walk(root, 16.0)
     tree.write(args.dst, encoding="unicode", xml_declaration=False)
-    print(f"wrote {args.dst} (amp {amp:.2f})")
+    print(f"wrote {args.dst} (amp {amp:.3g})")
 
 
 if __name__ == "__main__":
