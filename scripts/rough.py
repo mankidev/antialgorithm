@@ -10,6 +10,7 @@ ET.register_namespace("", SVG_NS)
 ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
 MAX_DEPTH = 500
+SHAPE_ATTRS = ("x", "y", "width", "height", "x1", "y1", "x2", "y2", "points", "cx", "cy", "r", "rx", "ry")
 SKIP = {"defs", "clipPath", "mask", "pattern", "filter", "marker", "symbol", "linearGradient", "radialGradient", "style", "title", "desc"}
 NUM = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 TOK = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
@@ -136,6 +137,10 @@ def parse_path(d):
     return segs
 
 
+def shape_animated(el):
+    return any(tag(c) in ("animate", "set") and c.get("attributeName") in SHAPE_ATTRS for c in el)
+
+
 class Rougher:
     def __init__(self, amp, rng, root, box):
         self.amp = amp
@@ -190,11 +195,11 @@ class Rougher:
         return d + ("Z" if closed else "")
 
     def to_path(self, el, d):
-        keep = {k: v for k, v in el.attrib.items() if k not in {"x", "y", "width", "height", "x1", "y1", "x2", "y2", "points", "cx", "cy", "r", "rx", "ry"}}
-        el.clear()
+        if shape_animated(el):
+            return
+        for k in SHAPE_ATTRS:
+            el.attrib.pop(k, None)
         el.tag = f"{{{SVG_NS}}}path"
-        for k, v in keep.items():
-            el.set(k, v)
         el.set("d", d)
 
     def shift(self, el):
